@@ -2990,7 +2990,7 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
 
         esp_http_client_handle_t cl = esp_http_client_init(&cfg);
         esp_http_client_set_header(cl, "Content-Type", "application/json");
-        static char auth[96];
+        static char auth[160];
         snprintf(auth, sizeof(auth), "Bearer %s", ia_key());
         esp_http_client_set_header(cl, "Authorization", auth);
         esp_http_client_set_post_field(cl, body, strlen(body));
@@ -3982,7 +3982,7 @@ static esp_err_t sd_mount(bool format)
     mc.allocation_unit_size = 16 * 1024;
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;   /* 40 MHz : 2,3 -> 4,7 Mo/s bruts mesures */
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
     slot.width = 1;
     slot.clk = SD_CLK_PIN;
