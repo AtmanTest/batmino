@@ -2210,9 +2210,16 @@ static void assistant_wake_task(void *arg)
 static void assistant_wake(void)
 {
     if (wake_busy) return;
-    /* 16 Ko : le TLS + le JSON du cerveau ne tiennent pas dans 6 Ko (la carte
-       redemarrait en pleine conversation). */
-    xTaskCreate(assistant_wake_task, "reveil", 16384, NULL, 4, NULL);
+    /* 16 Ko : le TLS + le JSON du cerveau ne tiennent pas dans 6 Ko.
+       Pile en PSRAM : la RAM interne n'a plus 16 Ko contigus (xTaskCreate
+       echouait en silence et le bouton ne faisait rien). */
+    TaskHandle_t h = NULL;
+    if (xTaskCreateWithCaps(assistant_wake_task, "reveil", 16384, NULL, 4, &h,
+                            MALLOC_CAP_SPIRAM) != pdPASS) {
+        ESP_LOGE(TAG, "reveil : pas de pile (interne %u o, plus gros bloc %u o)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
 }
 
 /* ---- actions des boutons, isolees : declenchables aussi par /bouton (test a distance) ----
@@ -3391,6 +3398,26 @@ static esp_err_t h_parle(httpd_req_t *req)
     return ESP_OK;
 }
 
+static void voix_dit(const char *texte);   /* defini plus loin */
+
+/* /dit?t=texte : injecte un texte comme s'il venait du micro (test du cerveau
+   et de la voix sans parler). Ne touche ni au micro ni a la reconnaissance. */
+static esp_err_t h_dit(httpd_req_t *req)
+{
+    char txt[300] = "";
+    if (qval(req, "t", txt, sizeof(txt)) != ESP_OK || strlen(txt) < 1)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "texte");
+    char dit[800] = "", emo[32] = "neutre";
+    esp_err_t e = ds_chat(txt, dit, sizeof(dit), emo, sizeof(emo));
+    if (e == ESP_OK) { paroles_ajoute("MOI", txt); paroles_ajoute("MINO", dit); voix_dit(dit); }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "ok", e == ESP_OK);
+    cJSON_AddStringToObject(r, "dit", dit);
+    cJSON_AddStringToObject(r, "emotion", emo);
+    cJSON_AddStringToObject(r, "err", esp_err_to_name(e));
+    return send_json(req, r);
+}
+
 /* enregistre la cle a chaud : /cle?k=gsk_xxx (elle survit au redemarrage) */
 static esp_err_t h_cle(httpd_req_t *req)
 {
@@ -3947,6 +3974,9 @@ static void voix_tour(const uint8_t *pcm, int len)
     show_ui();
     esp_err_t e;
     if (groq_pret()) {
+        ESP_LOGI(TAG, "voix : avant STT, interne libre %u o, plus gros bloc %u o",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         e = stt_groq(wav, parle_len + 44, texte, sizeof(texte));
     } else {
         /* pas de cle : on passe le PCM brut a la reconnaissance de Chrome */
@@ -5703,6 +5733,11 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "cpu_mhz", (double)(esp_clk_cpu_freq() / 1000000));
     cJSON_AddNumberToObject(r, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(r, "heap_libre", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(r, "heap_interne", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(r, "heap_interne_max",
+                            (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(r, "heap_dma_max",
+                            (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "psram_libre", (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     cJSON_AddItemToObject(r, "familles", cJSON_CreateStringArray(FAMILLES, FAMILLE_N));
     cJSON_AddItemToObject(r, "memoire", cJSON_Duplicate(cJSON_GetObjectItem(mem_obj, "notes"), 1));
@@ -5784,7 +5819,9 @@ static void api_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 28;
-    cfg.stack_size = 16384;   /* h_say fait du TLS : 8 Ko ne suffisaient pas */
+    cfg.stack_size = 12288;   /* h_say fait du TLS : 8 Ko ne suffisaient pas */
+    cfg.max_open_sockets = 2; /* 7 sockets par defaut = 7 piles de 16 Ko (112 Ko
+                                 de RAM interne) ; on n'a jamais plus de 2 clients */
     cfg.lru_purge_enable = true;
     httpd_handle_t srv = NULL;
     if (httpd_start(&srv, &cfg) != ESP_OK) {
@@ -5819,6 +5856,7 @@ static void api_start(void)
     u.handler = h_timer; u.uri = "/timer"; httpd_register_uri_handler(srv, &u);
     u.handler = h_bouton; u.uri = "/bouton"; httpd_register_uri_handler(srv, &u);
     u.handler = h_parle; u.uri = "/parle"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_dit;   u.uri = "/dit";   httpd_register_uri_handler(srv, &u);
     u.handler = h_fichier; u.uri = "/fichier"; httpd_register_uri_handler(srv, &u);
     u.method = HTTP_POST;
     u.handler = h_play; u.uri = "/play";  httpd_register_uri_handler(srv, &u);
