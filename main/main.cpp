@@ -4120,6 +4120,64 @@ static esp_err_t h_play(httpd_req_t *req)
     return send_json(req, r);
 }
 
+/* POST /fichier?p=/backup/x.tar.gz : ecrit le corps recu sur la carte SD.
+   GET  /fichier?p=/backup/x.tar.gz : renvoie le fichier.
+   Sert a sauvegarder/relire des fichiers sur la SD sans lecteur de carte. */
+static esp_err_t h_fichier(httpd_req_t *req)
+{
+    char q[256] = {0}, val[200] = {0};
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK ||
+        httpd_query_key_value(q, "p", val, sizeof(val)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "p= requis");
+    if (val[0] != '/')
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "chemin absolu requis");
+    if (strstr(val, ".."))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ".. interdit");
+
+    char chemin[256];
+    snprintf(chemin, sizeof(chemin), "/sdcard%s", val);
+    if (strlen(chemin) >= sizeof(chemin) - 1)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "chemin trop long");
+
+    if (req->method == HTTP_POST) {
+        char *slash = strrchr(chemin, '/');
+        if (slash && slash > chemin + 7) {          /* cree le dossier parent */
+            *slash = 0;
+            mkdir(chemin, 0777);
+            *slash = '/';
+        }
+        FILE *f = fopen(chemin, "wb");
+        if (!f) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ouverture");
+        static char buf[2048];
+        long total = 0;
+        while (1) {
+            int got = httpd_req_recv(req, buf, sizeof(buf));
+            if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            if (got <= 0) break;
+            fwrite(buf, 1, got, f);
+            total += got;
+        }
+        fflush(f);
+        fsync(fileno(f));
+        fclose(f);
+        ESP_LOGI(TAG, "fichier recu : %s (%ld octets)", chemin, total);
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "fichier", chemin);
+        cJSON_AddNumberToObject(r, "octets", total);
+        return send_json(req, r);
+    }
+
+    FILE *f = fopen(chemin, "rb");
+    if (!f) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "absent");
+    httpd_resp_set_type(req, "application/octet-stream");
+    static char buf[2048];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+    fclose(f);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* aides audio reutilisables (console serie et API partagent)          */
 /* ------------------------------------------------------------------ */
@@ -5195,9 +5253,11 @@ static void api_start(void)
     u.handler = h_timer; u.uri = "/timer"; httpd_register_uri_handler(srv, &u);
     u.handler = h_bouton; u.uri = "/bouton"; httpd_register_uri_handler(srv, &u);
     u.handler = h_parle; u.uri = "/parle"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_fichier; u.uri = "/fichier"; httpd_register_uri_handler(srv, &u);
     u.method = HTTP_POST;
     u.handler = h_play; u.uri = "/play";  httpd_register_uri_handler(srv, &u);
-    ESP_LOGI(TAG, "API : /state /face?e= /say?q= /note?t= /soul /rec?ms= /play(POST) /cle?k= /sd /sdformat");
+    u.handler = h_fichier; u.uri = "/fichier"; httpd_register_uri_handler(srv, &u);
+    ESP_LOGI(TAG, "API : /state /face?e= /say?q= /note?t= /soul /rec?ms= /play(POST) /cle?k= /sd /sdformat /fichier(GET,POST)");
 }
 
 /* ------------------------------------------------------------------ */
