@@ -40,6 +40,7 @@
 #include "petart.h"
 #include "esp_private/esp_clk.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/usb_serial_jtag.h"
@@ -4117,6 +4118,39 @@ static esp_err_t h_swap(httpd_req_t *req)
 {
     char v[24] = "";
     cJSON *r = cJSON_CreateObject();
+
+    /* op=fatfs : meme mesure mais via l'API FatFs brute (sans newlib/VFS) */
+    if (qval(req, "op", v, sizeof(v)) == ESP_OK && !strcmp(v, "fatfs")) {
+        int bloc = 65536;
+        if (qval(req, "bloc", v, sizeof(v)) == ESP_OK) bloc = atoi(v) * 1024;
+        if (bloc < 512 || bloc > 262144) bloc = 65536;
+        size_t total = 4 * 1024 * 1024;
+        uint8_t *buf = (uint8_t *)heap_caps_malloc(bloc, MALLOC_CAP_SPIRAM);
+        if (!buf) { cJSON_AddBoolToObject(r, "ok", false); return send_json(req, r); }
+        memset(buf, 0x5C, bloc);
+        FIL fil; UINT bw = 0, br = 0;
+        FRESULT fr = f_open(&fil, "fbench.bin", FA_WRITE | FA_CREATE_ALWAYS);
+        int64_t t0 = esp_timer_get_time();
+        size_t fait = 0;
+        while (fr == FR_OK && fait < total) { f_write(&fil, buf, bloc, &bw); fait += bw; if (!bw) break; }
+        if (fr == FR_OK) f_sync(&fil);
+        f_close(&fil);
+        int64_t t1 = esp_timer_get_time();
+        fr = f_open(&fil, "fbench.bin", FA_READ);
+        size_t lu = 0;
+        while (fr == FR_OK && lu < total) { f_read(&fil, buf, bloc, &br); lu += br; if (!br) break; }
+        f_close(&fil);
+        int64_t t2 = esp_timer_get_time();
+        f_unlink("fbench.bin");
+        free(buf);
+        cJSON_AddStringToObject(r, "via", "fatfs-brut");
+        cJSON_AddNumberToObject(r, "bloc_ko", bloc / 1024);
+        cJSON_AddNumberToObject(r, "ecriture_mo_s",
+            (double)fait / ((double)(t1 - t0) / 1e6) / 1048576.0);
+        cJSON_AddNumberToObject(r, "lecture_mo_s",
+            (double)lu / ((double)(t2 - t1) / 1e6) / 1048576.0);
+        return send_json(req, r);
+    }
 
     if (qval(req, "op", v, sizeof(v)) == ESP_OK && !strcmp(v, "bench")) {
         int bloc = 65536;
