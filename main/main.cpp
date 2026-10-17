@@ -2125,10 +2125,12 @@ static void tone_task(void *arg)
 /* ================================================================== */
 
 static volatile bool wake_busy = false;
+static volatile bool assist_abort = false;   /* bouton 2 : on abandonne l'ecoute/la reponse */
 
 static void assistant_wake_task(void *arg)
 {
     wake_busy = true;
+    assist_abort = false;
     if (radio_etat != 0 && !parler_radio_ouverte) radio_stop();   /* on coupe la radio pour ecouter */
     /* on parle a un enfant de six ans : un ecran, un micro, trois mots */
     ui_page = PAGE_PARLER;
@@ -2148,6 +2150,7 @@ static void assistant_wake_task(void *arg)
        ventilateur non. Sans ca, il fallait presque crier dans le micro. */
     int seuil = 900;
     while (done < total) {
+        if (assist_abort) break;                 /* bouton 2 : on quitte la tache */
         int p = 0;
         int n = audio_record_at(done, step, &p);
         if (n <= 0) break;
@@ -2169,6 +2172,15 @@ static void assistant_wake_task(void *arg)
            clic fait croire qu'on a parle et l'ecoute s'arrete aussitot */
         if (parle && soutenu >= 2 && silence >= 3) break;
         act_pct = (done * 100) / total;
+    }
+    if (assist_abort) {
+        voix_etat = 0;
+        voix_reponse[0] = 0;
+        ui_page = PAGE_MAITRE;
+        show_ui();
+        wake_busy = false;
+        vTaskDelete(NULL);
+        return;
     }
     rec_last_bytes = done * 2;
     audio_sd_write("/sdcard/voix.wav", rec_pcm, rec_last_bytes);
@@ -2203,25 +2215,52 @@ static void assistant_wake(void)
 }
 
 /* ---- actions des boutons, isolees : declenchables aussi par /bouton (test a distance) ----
-   REGLE D'OR : un appui COURT change TOUJOURS de page. Aucune page ne peut bloquer.
-   Les appuis LONGS portent les actions contextuelles (radio, timer, parler).        */
-static void bouton_court(int n)          /* n : 0 = BOOT, 1 = PWR */
+   MODELE (v0.4) :
+     bouton 1 (BOOT) appui COURT : lance la tache de la page.
+        accueil / parler -> chat vocal ; radio -> jouer/arreter ; timer -> creer/valider
+     bouton 2 (PWR)  appui COURT : quitte la tache en cours et revient a l'accueil ;
+        si aucune tache ne tourne, passe a la page suivante.
+     appui LONG  : inchange (contextuel) ; DOUBLE appui : detecte, reserve pour la suite. */
+static void bouton_long(int n, int tres_long);
+
+static void tache_arrete(void)
 {
-    if (n == 0) {
-        if (ui_page == PAGE_TIMER && timer_mode == 1) {
-            timer_edit_val = (timer_edit_val + 60) % 3600;      /* +1 min */
+    if (wake_busy) assist_abort = true;          /* la tache reveil sort d'elle-meme */
+    if (radio_etat) radio_stop();
+    if (parler_radio_ouverte) parler_radio_ouverte = false;
+    voix_etat = 0;
+}
+
+static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
+{
+    if (n == 0) {                                     /* LANCER la tache de la page */
+        if (ui_page == PAGE_RADIO) {
+            if (radio_etat) radio_stop(); else radio_joue();
+        } else if (ui_page == PAGE_TIMER) {
+            bouton_long(0, 0);                        /* memes etapes que l'appui long */
         } else {
-            ui_page = (ui_page + 1) % PAGE_COUNT;               /* page suivante, toujours */
+            assistant_wake();                         /* chat vocal */
         }
-    } else {
+    } else {                                          /* QUITTER / page suivante */
         if (ui_page == PAGE_TIMER && timer_mode == 1) {
-            timer_edit_val = (timer_edit_val + 3540) % 3600;    /* -1 min */
-        } else {
-            ui_page = (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;  /* page precedente, toujours */
+            timer_edit_val = (timer_edit_val + 60) % 3600;    /* edition : +1 min */
+            show_ui();
+            return;
         }
+        bool tache = wake_busy || radio_etat || voix_etat;
+        tache_arrete();
+        if (tache) ui_page = PAGE_MAITRE;              /* retour accueil */
+        else       ui_page = (ui_page + 1) % PAGE_COUNT;
     }
-    ESP_LOGI(TAG, "bouton %s : page %d", n == 0 ? "0" : "18", (int)ui_page);
+    ESP_LOGI(TAG, "bouton %s : page %d", n == 0 ? "1-lancer" : "2-quitter", (int)ui_page);
     show_ui();
+}
+
+static void bouton_double(int n)
+{
+    /* reserve : pour l'instant le double appui ne fait rien (et surtout il ne
+       rejoue pas l'action du simple appui, deja declenchee) */
+    ESP_LOGI(TAG, "bouton %s : double appui (reserve)", n == 0 ? "1" : "2");
 }
 
 static void bouton_long(int n, int tres_long)
@@ -2299,8 +2338,10 @@ static void bouton_long(int n, int tres_long)
 
 static volatile bool g_sim_court[2] = {false, false};
 static volatile bool g_sim_long[2]  = {false, false};
+static volatile bool g_sim_double[2] = {false, false};
 static void bouton_court(int n);
 static void bouton_long(int n, int tres_long);
+static void bouton_double(int n);
 
 static void button_task(void *arg)
 {
@@ -2310,12 +2351,15 @@ static void button_task(void *arg)
     io.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io);
     int last0 = 1, last18 = 1;
+    int64_t dernier_court[2] = {0, 0};
     for (;;) {
         /* appuis simules par /bouton (verification a distance) */
         if (g_sim_court[0]) { g_sim_court[0] = false; bouton_court(0); }
         if (g_sim_court[1]) { g_sim_court[1] = false; bouton_court(1); }
         if (g_sim_long[0])  { g_sim_long[0]  = false; bouton_long(0, 0); }
         if (g_sim_long[1])  { g_sim_long[1]  = false; bouton_long(1, 0); }
+        if (g_sim_double[0]) { g_sim_double[0] = false; bouton_double(0); }
+        if (g_sim_double[1]) { g_sim_double[1] = false; bouton_double(1); }
 
         int b0 = gpio_get_level(GPIO_NUM_0);
         int b18 = gpio_get_level(GPIO_NUM_18);
@@ -2326,7 +2370,12 @@ static void button_task(void *arg)
                 held++;
             }
             if (held >= 18) bouton_long(0, held >= 40);
-            else if (held >= 1) bouton_court(0);
+            else if (held >= 1) {
+                int64_t now = esp_timer_get_time();
+                if (now - dernier_court[0] < 400000) bouton_double(0);
+                else                                 bouton_court(0);
+                dernier_court[0] = now;
+            }
         }
         if (last18 == 1 && b18 == 0) {                     /* BOUTON 18 (PWR) */
             int held = 0;
@@ -2335,7 +2384,12 @@ static void button_task(void *arg)
                 held++;
             }
             if (held >= 18) bouton_long(1, 0);
-            else if (held >= 1) bouton_court(1);
+            else if (held >= 1) {
+                int64_t now = esp_timer_get_time();
+                if (now - dernier_court[1] < 400000) bouton_double(1);
+                else                                 bouton_court(1);
+                dernier_court[1] = now;
+            }
         }
         /* sonnerie : n'importe quel appui l'arrete */
         if (timer_mode == 0 && timers[timer_sel].sonne && (b0 == 0 || b18 == 0)) {
@@ -2364,8 +2418,9 @@ static esp_err_t h_bouton(httpd_req_t *req)
         int n = atoi(v) ? 1 : 0;
         char m[16] = "court";
         qval(req, "m", m, sizeof(m));
-        if (!strcmp(m, "long")) g_sim_long[n]  = true;
-        else                    g_sim_court[n] = true;
+        if (!strcmp(m, "long"))        g_sim_long[n]   = true;
+        else if (!strcmp(m, "double")) g_sim_double[n] = true;
+        else                           g_sim_court[n]  = true;
     }
     vTaskDelay(pdMS_TO_TICKS(500));            /* laisse la tache bouton agir */
     cJSON *r = cJSON_CreateObject();
@@ -4006,17 +4061,43 @@ static esp_err_t sd_mount(bool format)
 
 static esp_err_t h_sd_list(httpd_req_t *req)
 {
+    /* /sd            -> racine de la carte
+       /sd?p=/backup  -> un sous-dossier                                      */
+    char q[128] = {0}, val[100] = {0}, chemin[128];
+    snprintf(chemin, sizeof(chemin), "/sdcard");
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "p", val, sizeof(val)) == ESP_OK) {
+        if (val[0] != '/' || strstr(val, ".."))
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "p invalide");
+        snprintf(chemin, sizeof(chemin), "/sdcard%s", val);
+    }
+
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "presente", sd_ok);
+    cJSON_AddStringToObject(r, "dossier", chemin);
     cJSON *files = cJSON_AddArrayToObject(r, "fichiers");
     if (sd_ok) {
-        DIR *d = opendir("/sdcard");
+        DIR *d = opendir(chemin);
         if (d) {
             struct dirent *e;
             int n = 0;
-            while ((e = readdir(d)) && n < 30) {
+            while ((e = readdir(d)) && n < 40) {
                 if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-                cJSON_AddItemToArray(files, cJSON_CreateString(e->d_name));
+                /* n'affiche que les noms imprimables : une entree de repertoire
+                   abimee ne doit pas pourrir toute la reponse JSON */
+                int ok = 1;
+                for (const char *c = e->d_name; *c; c++)
+                    if ((unsigned char)*c < 0x20) { ok = 0; break; }
+                char plein[400];
+                struct stat st;
+                long taille = -1;
+                snprintf(plein, sizeof(plein), "%s/%.255s", chemin, e->d_name);
+                if (stat(plein, &st) == 0) taille = (long)st.st_size;
+                cJSON *o = cJSON_CreateObject();
+                cJSON_AddStringToObject(o, "nom", e->d_name);
+                cJSON_AddNumberToObject(o, "taille", (double)taille);
+                cJSON_AddBoolToObject(o, "lisible", ok);
+                cJSON_AddItemToArray(files, o);
                 n++;
             }
             closedir(d);
@@ -4025,14 +4106,90 @@ static esp_err_t h_sd_list(httpd_req_t *req)
     return send_json(req, r);
 }
 
+/* ------------------------------------------------------------------ */
+/* /swap : la carte SD comme memoire de debordement                    */
+/* L'ESP32-S3 n'a pas de MMU : pas de swap/pagination possible. Ce qui */
+/* marche, c'est un cache d'ecriture en PSRAM vide vers la SD en gros  */
+/* blocs, et un stockage de donnees rarement lues. op=bench mesure le  */
+/* meilleur couple (taille de bloc, debit) reellement atteignable.      */
+/* ------------------------------------------------------------------ */
+static esp_err_t h_swap(httpd_req_t *req)
+{
+    char v[24] = "";
+    cJSON *r = cJSON_CreateObject();
+
+    if (qval(req, "op", v, sizeof(v)) == ESP_OK && !strcmp(v, "bench")) {
+        int bloc = 65536;
+        if (qval(req, "bloc", v, sizeof(v)) == ESP_OK) bloc = atoi(v) * 1024;
+        if (bloc < 512 || bloc > 262144) bloc = 65536;
+        size_t total = 4 * 1024 * 1024;
+        if (qval(req, "mo", v, sizeof(v)) == ESP_OK) {
+            int mo = atoi(v);
+            if (mo > 0 && mo <= 16) total = (size_t)mo * 1024 * 1024;
+        }
+        uint8_t *buf = (uint8_t *)heap_caps_malloc(bloc, MALLOC_CAP_SPIRAM);
+        if (!buf) { cJSON_AddBoolToObject(r, "ok", false);
+                    cJSON_AddStringToObject(r, "erreur", "alloc");
+                    return send_json(req, r); }
+        memset(buf, 0xA7, bloc);
+        int64_t t0 = esp_timer_get_time();
+        FILE *f = fopen("/sdcard/swap.bin", "wb");
+        size_t fait = 0;
+        while (f && fait < total) { fwrite(buf, 1, bloc, f); fait += bloc; }
+        if (f) { fflush(f); fsync(fileno(f)); fclose(f); }
+        int64_t t1 = esp_timer_get_time();
+        f = fopen("/sdcard/swap.bin", "rb");
+        size_t lu = 0;
+        while (f && lu < total) { size_t k = fread(buf, 1, bloc, f); if (!k) break; lu += k; }
+        if (f) fclose(f);
+        int64_t t2 = esp_timer_get_time();
+        remove("/sdcard/swap.bin");
+        free(buf);
+        cJSON_AddBoolToObject(r, "ok", fait == total && lu == total);
+        cJSON_AddNumberToObject(r, "bloc_ko", bloc / 1024);
+        cJSON_AddNumberToObject(r, "ecriture_mo_s",
+            (double)fait / ((double)(t1 - t0) / 1e6) / 1048576.0);
+        cJSON_AddNumberToObject(r, "lecture_mo_s",
+            (double)lu / ((double)(t2 - t1) / 1e6) / 1048576.0);
+        return send_json(req, r);
+    }
+
+    uint64_t tot = 0, libre = 0;
+    esp_vfs_fat_info("/sdcard", &tot, &libre);
+    cJSON_AddNumberToObject(r, "total_mo", (double)tot / 1048576.0);
+    cJSON_AddNumberToObject(r, "libre_mo", (double)libre / 1048576.0);
+    cJSON_AddStringToObject(r, "note",
+        "pas de swap OS (pas de MMU) ; utiliser op=bench pour le debit par bloc");
+    return send_json(req, r);
+}
+
+/* /sdformat?f=1 : reformate VRAIMENT la carte (efface tout).
+   Sans f=1 on se contente de remonter : le mount reussit toujours sur une carte
+   deja formatee, donc l'ancienne version ne formattoir jamais rien. */
 static esp_err_t h_sd_format(httpd_req_t *req)
 {
+    char v[8] = "";
+    bool vraiment = (qval(req, "f", v, sizeof(v)) == ESP_OK && v[0] == '1');
+
     cJSON *r = cJSON_CreateObject();
-    if (sd_ok) {
-        esp_vfs_fat_sdcard_unmount("/sdcard", sd_card);
-        sd_ok = false;
+    cJSON_AddBoolToObject(r, "formate", vraiment);
+    if (!vraiment) {
+        cJSON_AddStringToObject(r, "note", "ajouter f=1 pour effacer la carte");
+        return send_json(req, r);
     }
-    esp_err_t err = sd_mount(true);
+    if (!sd_ok || !sd_card) {
+        cJSON_AddBoolToObject(r, "ok", false);
+        cJSON_AddStringToObject(r, "erreur", "carte absente");
+        return send_json(req, r);
+    }
+    sd_ok = false;
+    esp_err_t err = esp_vfs_fat_sdcard_format("/sdcard", sd_card);
+    if (err == ESP_OK) {
+        /* le montage reste valide apres format ; on recree l'arborescence */
+        mkdir("/sdcard/mino", 0777);
+        mkdir("/sdcard/backup", 0777);
+        sd_ok = true;
+    }
     cJSON_AddBoolToObject(r, "ok", err == ESP_OK);
     if (err != ESP_OK) cJSON_AddStringToObject(r, "erreur", esp_err_to_name(err));
     return send_json(req, r);
@@ -4148,7 +4305,7 @@ static esp_err_t h_fichier(httpd_req_t *req)
         }
         FILE *f = fopen(chemin, "wb");
         if (!f) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ouverture");
-        static char buf[2048];
+        static char buf[32768];              /* gros blocs : la SD aime */
         long total = 0;
         while (1) {
             int got = httpd_req_recv(req, buf, sizeof(buf));
@@ -4170,7 +4327,7 @@ static esp_err_t h_fichier(httpd_req_t *req)
     FILE *f = fopen(chemin, "rb");
     if (!f) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "absent");
     httpd_resp_set_type(req, "application/octet-stream");
-    static char buf[2048];
+    static char buf[32768];
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
@@ -5243,6 +5400,7 @@ static void api_start(void)
     u.handler = h_radio; u.uri = "/radio"; httpd_register_uri_handler(srv, &u);
     u.handler = h_sd_list; u.uri = "/sd"; httpd_register_uri_handler(srv, &u);
     u.handler = h_sd_format; u.uri = "/sdformat"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_swap; u.uri = "/swap"; httpd_register_uri_handler(srv, &u);
     u.handler = h_cle;  u.uri = "/cle";   httpd_register_uri_handler(srv, &u);
     u.handler = h_mic;  u.uri = "/mic";   httpd_register_uri_handler(srv, &u);
     u.handler = h_tts;  u.uri = "/tts";   httpd_register_uri_handler(srv, &u);
