@@ -4060,6 +4060,379 @@ static esp_err_t sd_mount(bool format)
     return r;
 }
 
+/* ------------------------------------------------------------------ */
+/* Repartitionnement de la carte : FAT32 (fichiers) + zone brute      */
+/* (memoire de debordement). Le MBR et le FAT32 sont ecrits a la main :*/
+/* f_mkfs ne sait formater qu'un disque entier, pas une partition.     */
+/* ------------------------------------------------------------------ */
+#include "sdmmc_cmd.h"
+
+static uint32_t part_info[4][3];    /* {start, size, type} en secteurs */
+static int      part_n = 0;
+
+static sdmmc_card_t *sd_raw_open(void)
+{
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot.width = 1;
+    slot.clk = SD_CLK_PIN;
+    slot.cmd = SD_MOSI_CMD_PIN;
+    slot.d0  = SD_MISO_D0_PIN;
+    sdmmc_card_t *card = (sdmmc_card_t *)calloc(1, sizeof(sdmmc_card_t));
+    if (!card) return NULL;
+    if (sdmmc_card_init(&host, card) != ESP_OK) { free(card); return NULL; }
+    return card;
+}
+
+static void part_lire_mbr(sdmmc_card_t *card)
+{
+    uint8_t mbr[512];
+    part_n = 0;
+    if (sdmmc_read_sectors(card, mbr, 0, 1) != ESP_OK) return;
+    for (int i = 0; i < 4; i++) {
+        const uint8_t *e = mbr + 446 + i * 16;
+        uint32_t start = e[8] | (e[9] << 8) | (e[10] << 16) | ((uint32_t)e[11] << 24);
+        uint32_t size  = e[12] | (e[13] << 8) | (e[14] << 16) | ((uint32_t)e[15] << 24);
+        if (size) {
+            part_info[part_n][0] = start;
+            part_info[part_n][1] = size;
+            part_info[part_n][2] = e[4];
+            part_n++;
+        }
+    }
+}
+
+static void p16(uint8_t *p, uint16_t v) { p[0] = v & 0xff; p[1] = v >> 8; }
+static void p32(uint8_t *p, uint32_t v) { p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24; }
+
+/* ecrit en zero `n` secteurs a partir de `start` ; renvoie false si erreur */
+static bool part_zero(sdmmc_card_t *card, uint32_t start, uint32_t n)
+{
+    const uint32_t par = 32;                 /* 16 Ko par appel (SRAM interne) */
+    uint8_t *z = (uint8_t *)heap_caps_aligned_alloc(512, par * 512,
+                                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!z) return false;
+    memset(z, 0, par * 512);
+    bool ok = true;
+    for (uint32_t s = 0; s < n && ok; s += par) {
+        uint32_t k = (n - s < par) ? (n - s) : par;
+        if (sdmmc_write_sectors(card, z, start + s, k) != ESP_OK) ok = false;
+    }
+    free(z);
+    return ok;
+}
+
+/* MBR : partition 1 = FAT32 LBA (0x0C), partition 2 = brute (0xDA) */
+static bool part_ecrire_mbr(sdmmc_card_t *card, uint32_t p1s, uint32_t p1n,
+                            uint32_t p2s, uint32_t p2n)
+{
+    uint8_t mbr[512];
+    memset(mbr, 0, sizeof(mbr));
+    uint8_t *e1 = mbr + 446, *e2 = mbr + 462;
+    e1[0] = 0x00; e1[4] = 0x0C;
+    p32(e1 + 8, p1s);  p32(e1 + 12, p1n);
+    if (p2n) {
+        e2[0] = 0x00; e2[4] = 0xDA;
+        p32(e2 + 8, p2s);  p32(e2 + 12, p2n);
+    }
+    mbr[510] = 0x55; mbr[511] = 0xAA;
+    return sdmmc_write_sectors(card, mbr, 0, 1) == ESP_OK;
+}
+
+/* FAT32 fait main dans la partition [start, start+size) */
+static esp_err_t part_formater(sdmmc_card_t *card, uint32_t start, uint32_t size,
+                               uint32_t *clusters_out, uint32_t *fat_sz_out)
+{
+    uint8_t spc = 64;                            /* 32 Ko par cluster */
+    if (size < 8 * 1024 * 1024) spc = 8;
+    else if (size < 64 * 1024 * 1024) spc = 1;
+
+    const uint32_t reserved = 32;
+    uint32_t clusters = (size - reserved) / spc;
+    uint32_t fat_sz = (uint32_t)(((uint64_t)(clusters + 2) * 4 + 511) / 512);
+    clusters = (size - reserved - 2 * fat_sz) / spc;
+    fat_sz = (uint32_t)(((uint64_t)(clusters + 2) * 4 + 511) / 512);
+    if (fat_sz == 0 || clusters < 1000) return ESP_ERR_INVALID_SIZE;
+
+    uint8_t bs[512];
+    memset(bs, 0, sizeof(bs));
+    bs[0] = 0xEB; bs[1] = 0x58; bs[2] = 0x90;
+    memcpy(bs + 3, "MSWIN4.1", 8);
+    p16(bs + 11, 512);
+    bs[13] = spc;
+    p16(bs + 14, reserved);
+    bs[16] = 2;
+    p16(bs + 17, 0);
+    p16(bs + 19, 0);
+    bs[21] = 0xF8;
+    p16(bs + 22, 0);
+    p16(bs + 24, 63); p16(bs + 26, 255);
+    p32(bs + 28, start);
+    p32(bs + 32, size);
+    p32(bs + 36, fat_sz);
+    p16(bs + 40, 0);
+    p16(bs + 42, 0);
+    p32(bs + 44, 2);
+    p16(bs + 48, 1);
+    p16(bs + 50, 6);
+    bs[64] = 0x80;
+    bs[66] = 0x29;
+    p32(bs + 67, 0x4D1A09B2);
+    memcpy(bs + 71, "MINO       ", 11);
+    memcpy(bs + 82, "FAT32   ", 8);
+    bs[510] = 0x55; bs[511] = 0xAA;
+
+    if (sdmmc_write_sectors(card, bs, start, 1) != ESP_OK) return ESP_FAIL;
+
+    uint8_t fsi[512];
+    memset(fsi, 0, sizeof(fsi));
+    p32(fsi + 0, 0x41615252);
+    p32(fsi + 484, 0x61417272);
+    p32(fsi + 488, 0xFFFFFFFF);
+    p32(fsi + 492, 0xFFFFFFFF);
+    p32(fsi + 508, 0xAA550000);
+    if (sdmmc_write_sectors(card, fsi, start + 1, 1) != ESP_OK) return ESP_FAIL;
+    if (sdmmc_write_sectors(card, bs,  start + 6, 1) != ESP_OK) return ESP_FAIL;
+    if (sdmmc_write_sectors(card, fsi, start + 7, 1) != ESP_OK) return ESP_FAIL;
+
+    /* les deux FAT a zero, puis les trois premieres entrees */
+    if (!part_zero(card, start + reserved, fat_sz * 2)) return ESP_FAIL;
+    uint8_t fat0[512];
+    memset(fat0, 0, sizeof(fat0));
+    p32(fat0 + 0, 0x0FFFFFF8);
+    p32(fat0 + 4, 0x0FFFFFFF);
+    p32(fat0 + 8, 0x0FFFFFFF);              /* cluster 2 = repertoire racine */
+    if (sdmmc_write_sectors(card, fat0, start + reserved, 1) != ESP_OK) return ESP_FAIL;
+    if (sdmmc_write_sectors(card, fat0, start + reserved + fat_sz, 1) != ESP_OK) return ESP_FAIL;
+
+    /* repertoire racine vide */
+    if (!part_zero(card, start + reserved + 2 * fat_sz, spc)) return ESP_FAIL;
+
+    if (clusters_out) *clusters_out = clusters;
+    if (fat_sz_out)   *fat_sz_out = fat_sz;
+    return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Zone d'echange (partition brute) : primitives de lecture/ecriture   */
+/* en blocs de 16 Ko (meilleur couple mesure : 3,6 Mo/s ecriture,      */
+/* 4,4 Mo/s lecture, contre 0,37 Mo/s via FATFS).                       */
+/* L'ESP32-S3 n'a pas de MMU : ce n'est pas un swap OS, c'est une       */
+/* memoire de debordement explicite (memcpy depuis/vers la PSRAM).      */
+/* ------------------------------------------------------------------ */
+#define SWAP_BLOC 16384
+
+static bool swap_ecrire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
+                        const void *src, size_t len)
+{
+    uint8_t *stage = (uint8_t *)heap_caps_aligned_alloc(512, SWAP_BLOC,
+                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!stage) return false;
+    const uint8_t *p = (const uint8_t *)src;
+    bool ok = true;
+    while (len && ok) {
+        size_t n = len < SWAP_BLOC ? len : SWAP_BLOC;
+        size_t plein = (n + 511) & ~(size_t)511;       /* secteurs entiers */
+        memcpy(stage, p, n);
+        if (plein > n) memset(stage + n, 0, plein - n);
+        ok = sdmmc_write_sectors(card, stage, lba_base + (uint32_t)(offset / 512),
+                                 plein / 512) == ESP_OK;
+        offset += plein; p += n; len -= n;
+    }
+    free(stage);
+    return ok;
+}
+
+static bool swap_lire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
+                      void *dst, size_t len)
+{
+    uint8_t *stage = (uint8_t *)heap_caps_aligned_alloc(512, SWAP_BLOC,
+                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!stage) return false;
+    uint8_t *p = (uint8_t *)dst;
+    bool ok = true;
+    while (len && ok) {
+        size_t n = len < SWAP_BLOC ? len : SWAP_BLOC;
+        size_t plein = (n + 511) & ~(size_t)511;
+        ok = sdmmc_read_sectors(card, stage, lba_base + (uint32_t)(offset / 512),
+                                plein / 512) == ESP_OK;
+        if (ok) memcpy(p, stage, n);
+        offset += plein; p += n; len -= n;
+    }
+    free(stage);
+    return ok;
+}
+
+/* /part                       -> etat des partitions
+   /part?op=repart&fat_go=100  -> repartitionne (destructif) : FAT32 100 Go + reste brut
+   /part?op=restore            -> carte entiere en FAT32 (retour arriere)
+   /part?op=rawbench&bloc=64   -> debit brut dans la zone swap                */
+static esp_err_t h_part(httpd_req_t *req)
+{
+    char v[24] = "";
+    char op[24] = "info";
+    qval(req, "op", op, sizeof(op));
+
+    if (!strcmp(op, "info")) {
+        bool possede = !sd_ok;
+        sdmmc_card_t *card = sd_ok ? sd_card : sd_raw_open();
+        if (!card) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "carte");
+        part_lire_mbr(card);
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddNumberToObject(r, "secteurs_carte", (double)card->csd.capacity);
+        cJSON *a = cJSON_AddArrayToObject(r, "partitions");
+        for (int i = 0; i < part_n; i++) {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "index", i + 1);
+            cJSON_AddNumberToObject(o, "type_hex", part_info[i][2]);
+            cJSON_AddNumberToObject(o, "debut_lba", (double)part_info[i][0]);
+            cJSON_AddNumberToObject(o, "secteurs", (double)part_info[i][1]);
+            cJSON_AddNumberToObject(o, "go", (double)part_info[i][1] * 512.0 / 1073741824.0);
+            cJSON_AddItemToArray(a, o);
+        }
+        if (possede) free(card);
+        return send_json(req, r);
+    }
+
+    if (!strcmp(op, "repart") || !strcmp(op, "restore")) {
+        /* on ecrit avec le handle du montage en cours : rouvrir la carte sans
+           reinitialiser le host SDMMC faisait planter la carte (panic). */
+        if (!sd_ok || !sd_card)
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "carte non montee");
+        sdmmc_card_t *card = sd_card;
+
+        uint32_t total = card->csd.capacity;
+        uint32_t p1s = 2048;
+        uint32_t p1n, p2n = 0, p2s = 0;
+        if (!strcmp(op, "restore")) {
+            p1n = total - p1s;
+        } else {
+            int go = 100;
+            if (qval(req, "fat_go", v, sizeof(v)) == ESP_OK) go = atoi(v);
+            if (go < 2) go = 2;
+            uint32_t want = (uint32_t)((uint64_t)go * 1000 * 1000 * 1000 / 512);
+            if (want > total - p1s - 2048) want = total - p1s - 2048;
+            p1n = (want / 2048) * 2048;               /* aligne sur 1 Mo */
+            p2s = p1s + p1n;
+            p2n = total - p2s;
+        }
+
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "op", op);
+        bool mbr_ok = part_ecrire_mbr(card, p1s, p1n, p2s, p2n);
+        uint32_t clusters = 0, fat_sz = 0;
+        esp_err_t err = mbr_ok ? part_formater(card, p1s, p1n, &clusters, &fat_sz)
+                               : ESP_FAIL;
+        esp_vfs_fat_sdcard_unmount("/sdcard", sd_card);   /* puis on remonte */
+        sd_ok = false;
+
+        cJSON_AddBoolToObject(r, "ok", err == ESP_OK);
+        cJSON_AddNumberToObject(r, "fat_go", (double)p1n * 512.0 / 1e9);
+        cJSON_AddNumberToObject(r, "swap_go", (double)p2n * 512.0 / 1e9);
+        cJSON_AddNumberToObject(r, "clusters", (double)clusters);
+        cJSON_AddNumberToObject(r, "fat_secteurs", (double)fat_sz);
+        if (err != ESP_OK) cJSON_AddStringToObject(r, "erreur", esp_err_to_name(err));
+        else {
+            esp_err_t m = sd_mount(false);             /* remonte la nouvelle FAT32 */
+            cJSON_AddBoolToObject(r, "remonte", m == ESP_OK);
+            if (m == ESP_OK) {
+                mkdir("/sdcard/mino", 0777);
+                mkdir("/sdcard/backup", 0777);
+            }
+        }
+        return send_json(req, r);
+    }
+
+    if (!strcmp(op, "st")) {          /* test des primitives de la zone d'echange */
+        int mo = 2;
+        if (qval(req, "n", v, sizeof(v)) == ESP_OK) mo = atoi(v);
+        if (mo < 1 || mo > 8) mo = 2;
+        size_t len = (size_t)mo * 1024 * 1024;
+        uint8_t *mem = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+        cJSON *r = cJSON_CreateObject();
+        if (!mem) { cJSON_AddBoolToObject(r, "ok", false); return send_json(req, r); }
+        memset(mem, 0xC3, len);
+        bool possede = !sd_ok;
+        sdmmc_card_t *card = sd_ok ? sd_card : sd_raw_open();
+        if (!card) { free(mem); cJSON_AddBoolToObject(r, "ok", false); return send_json(req, r); }
+        part_lire_mbr(card);
+        uint32_t base = (part_n > 1) ? part_info[1][0] : 0;
+        int64_t t0 = esp_timer_get_time();
+        bool w = swap_ecrire(card, base, 0, mem, len);
+        int64_t t1 = esp_timer_get_time();
+        memset(mem, 0, len);
+        bool rd = swap_lire(card, base, 0, mem, len);
+        int64_t t2 = esp_timer_get_time();
+        bool verif = true;
+        for (size_t i = 0; i < len; i += 4096) if (mem[i] != 0xC3) { verif = false; break; }
+        free(mem);
+        if (possede) free(card);
+        cJSON_AddBoolToObject(r, "ecrit", w);
+        cJSON_AddBoolToObject(r, "relu", rd);
+        cJSON_AddBoolToObject(r, "verifie", verif);
+        cJSON_AddNumberToObject(r, "ecriture_mo_s", (double)mo / ((double)(t1 - t0) / 1e6));
+        cJSON_AddNumberToObject(r, "lecture_mo_s",  (double)mo / ((double)(t2 - t1) / 1e6));
+        return send_json(req, r);
+    }
+
+    if (!strcmp(op, "rawtest")) {
+        bool possede = !sd_ok;
+        sdmmc_card_t *card = sd_ok ? sd_card : sd_raw_open();
+        if (!card) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "carte");
+        uint32_t lba = card->csd.capacity - 100;
+        uint8_t w[512], r[512];
+        memset(w, 0x5A, sizeof(w));
+        esp_err_t e1 = sdmmc_write_sectors(card, w, lba, 1);
+        esp_err_t e2 = sdmmc_read_sectors(card, r, lba, 1);
+        cJSON *r2 = cJSON_CreateObject();
+        cJSON_AddBoolToObject(r2, "ecrit", e1 == ESP_OK);
+        cJSON_AddBoolToObject(r2, "relu", e2 == ESP_OK);
+        cJSON_AddBoolToObject(r2, "identique", e2 == ESP_OK && !memcmp(w, r, 512));
+        cJSON_AddNumberToObject(r2, "lba", (double)lba);
+        if (possede) free(card);
+        return send_json(req, r2);
+    }
+
+    if (!strcmp(op, "rawbench")) {
+        int bloc = 64 * 1024;
+        if (qval(req, "bloc", v, sizeof(v)) == ESP_OK) bloc = atoi(v) * 1024;
+        if (bloc < 4096 || bloc > 256 * 1024) bloc = 64 * 1024;
+        bool possede = !sd_ok;
+        sdmmc_card_t *card = sd_ok ? sd_card : sd_raw_open();
+        if (!card) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "carte");
+        part_lire_mbr(card);
+        if (part_n < 2) { if (possede) free(card);
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "aucune zone brute"); }
+        uint32_t start = part_info[1][0];
+        uint32_t nsec = (4 * 1024 * 1024) / 512;
+        uint8_t *buf = (uint8_t *)heap_caps_aligned_alloc(512, bloc,
+                                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        if (!buf)   /* le pool DMA interne est petit : on tente la PSRAM */
+            buf = (uint8_t *)heap_caps_aligned_alloc(512, bloc, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        cJSON *r = cJSON_CreateObject();
+        if (!buf) { if (possede) free(card);
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "alloc"); }
+        memset(buf, 0x33, bloc);
+        int64_t t0 = esp_timer_get_time();
+        for (uint32_t s = 0; s < nsec; s += bloc / 512)
+            sdmmc_write_sectors(card, buf, start + s, bloc / 512);
+        int64_t t1 = esp_timer_get_time();
+        for (uint32_t s = 0; s < nsec; s += bloc / 512)
+            sdmmc_read_sectors(card, buf, start + s, bloc / 512);
+        int64_t t2 = esp_timer_get_time();
+        free(buf);
+        if (possede) free(card);
+        cJSON_AddBoolToObject(r, "ok", true);
+        cJSON_AddNumberToObject(r, "bloc_ko", bloc / 1024);
+        cJSON_AddNumberToObject(r, "ecriture_mo_s", 4.0 / ((double)(t1 - t0) / 1e6));
+        cJSON_AddNumberToObject(r, "lecture_mo_s",  4.0 / ((double)(t2 - t1) / 1e6));
+        return send_json(req, r);
+    }
+
+    return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "op inconnu");
+}
+
 static esp_err_t h_sd_list(httpd_req_t *req)
 {
     /* /sd            -> racine de la carte
@@ -5435,6 +5808,7 @@ static void api_start(void)
     u.handler = h_sd_list; u.uri = "/sd"; httpd_register_uri_handler(srv, &u);
     u.handler = h_sd_format; u.uri = "/sdformat"; httpd_register_uri_handler(srv, &u);
     u.handler = h_swap; u.uri = "/swap"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_part; u.uri = "/part"; httpd_register_uri_handler(srv, &u);
     u.handler = h_cle;  u.uri = "/cle";   httpd_register_uri_handler(srv, &u);
     u.handler = h_mic;  u.uri = "/mic";   httpd_register_uri_handler(srv, &u);
     u.handler = h_tts;  u.uri = "/tts";   httpd_register_uri_handler(srv, &u);
