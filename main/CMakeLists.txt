@@ -1,0 +1,2 @@
+idf_component_register(SRCS "main.cpp" "art.cpp" "pet.cpp" "petart.cpp"
+                    INCLUDE_DIRS "./")
