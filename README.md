@@ -11,6 +11,21 @@ courant (chat vocal sur l'accueil, radio, minuteur…), appui court du bouton 2 
 abandonner la tâche et changer de page, appui long = inchangé pour l'instant,
 double appui = détecté et réservé pour la suite.
 
+**Conversation continue** : après chaque réponse, le micro se réouvre seul
+pendant 10 s — on peut répondre sans rappuyer sur le bouton (10 tours max). Le
+fil est conservé (12 derniers échanges). Son rôle et le portrait de Taz
+(`/sdcard/mino/clone.md`) partent dans le prompt système.
+
+## Tests
+
+```bash
+bash tests/run_unit.sh    # unitaires, sur le PC (historique) : 12/12
+bash tests/api.sh         # integration + composant, sur la carte : 13/13
+```
+
+Les exigences par fonctionnalité sont dans `docs/us/` (US-001 conversation
+continue, US-002 clone et rôle, US-003 réponses longues).
+
 ## Démarrer
 
 ```bash
@@ -52,6 +67,7 @@ g++ -O2 -o preview preview.cpp ../main/art.cpp ../main/petart.cpp ../main/pet.cp
 /fichier?p=/chemin  GET = telecharge, POST = ecrit (sauvegardes par Wi-Fi)
 /part?op=info|repart&fat_go=N|restore|rawtest|rawbench&bloc=K|st&n=Mo
 /swap             etat de l'espace libre + bench FATFS (op=bench|fatfs&bloc=K)
+/dit?t=texte      injecte un texte comme s'il venait du micro (test cerveau+voix)
 ```
 
 La carte est partitionnee : FAT32 de 93 Go pour les fichiers + 23,9 Go de zone

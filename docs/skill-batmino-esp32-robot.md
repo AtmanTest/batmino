@@ -107,6 +107,36 @@ Test a distance : `/bouton?n=0|1&m=court|long|double`, `/bouton?p=0..3`.
 - Endpoints ajoutes : `/swap` (etat + `op=bench&bloc=K&mo=N`), `/sdformat?f=1`
   (reformate vraiment), `/sd?p=/dossier` (listing JSON nom/taille/lisible).
 
+## Conversation continue, clone et historique (v0.7)
+
+`assistant_wake_task()` boucle : un appui lance le 1er tour, puis le micro se
+reouvre seul `CONV_FENETRE_MS` (10 s) apres chaque reponse ; silence = fin,
+`CONV_MAX_TOURS` (10) borne la boucle. Le bouton 2 (`assist_abort`) coupe tout.
+
+Historique : `main/historique.h` (header seul, compile cote carte ET cote PC).
+`hist_t` garde `HIST_MAX` 12 tours de `HIST_TXT_SZ` 320 octets, envoyes au modele
+en vrais messages `user`/`assistant`. `/state` expose `historique_tours`.
+
+Clone de Taz : `/sdcard/mino/clone.md`, relu au demarrage (`CLONE lu sur la
+carte SD`), injecte dans le prompt avec le role (expert IT, IA, technicien
+superieur, developpeur, coach de vie, reflechir avant d'agir). Depose par
+`POST /fichier?p=/mino/clone.md` — pas besoin de reflasher.
+
+Reponses longues : `max_tokens` 700, temperature 0,7, prompt impose 3-6 phrases.
+`tts_parle()` decoupe en morceaux de 180 caracteres (limite Google) coupes sur
+la ponctuation et appelle `tts_parle_un()` — sinon la voix s'arretait a 190
+caracteres.
+
+Tests (`bash tests/run_unit.sh`, `bash tests/api.sh`) : 12 unitaires + 13
+d'integration. Le test `zone d'echange` attrape un piege reel : le tampon relais
+16 Ko doit etre alloue UNE fois (`swap_tampon()`), sinon l'allocation echoue des
+que le plus gros bloc interne passe sous 16 Ko.
+
+Sauvegarde : `~/mino-backup-usb.sh` + timer systemd utilisateur
+`mino-backup.timer` (30 min, OnUnitActiveSec), archive datee dans
+`/run/media/taz/MINO-ESP32/backup`, journal `~/mino-backup.log`. Le cron Hermes
+n'est pas fiable ici : il exige la passerelle locale demarree.
+
 ## RAM interne : le piege qui casse la voix (v0.6)
 
 Symptomes : le bouton ne fait rien, ou "je n'ai pas bien compris", ou TTS -1.

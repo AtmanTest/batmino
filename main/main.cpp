@@ -2128,36 +2128,21 @@ static void tone_task(void *arg)
 static volatile bool wake_busy = false;
 static volatile bool assist_abort = false;   /* bouton 2 : on abandonne l'ecoute/la reponse */
 
-static void assistant_wake_task(void *arg)
+/* une prise de son : renvoie les octets utiles (0 si rien d'audible) */
+static int ecoute_pcm(int ms_max, int *peak_out, int *seuil_out)
 {
-    wake_busy = true;
-    assist_abort = false;
-    if (radio_etat != 0 && !parler_radio_ouverte) radio_stop();   /* on coupe la radio pour ecouter */
-    /* on parle a un enfant de six ans : un ecran, un micro, trois mots */
-    ui_page = PAGE_PARLER;
-    voix_etat = 1;                     /* j'ecoute */
-    voix_reponse[0] = 0;
-    show_ui();
-    ui_beep();
-    ui_beep();
-    vTaskDelay(pdMS_TO_TICKS(150));
-    /* tranches de 0,25 s : on s'arrete tout seul des que l'enfant a fini
-       (0,9 s de silence apres avoir parle), et au plus tard apres 6 s */
     const int step = 4000;                       /* 0,25 s a 16 kHz */
-    const int total = (assist_parle_ms > 0 ? assist_parle_ms : 6000) * 16;
+    const int total = ms_max * 16;
     int done = 0, peak = 0, silence = 0, parle = 0, soutenu = 0;
-    int bruit = 0, bruit_n = 0;
-    /* le seuil s'adapte au bruit de la piece : une voix douce passe, un
-       ventilateur non. Sans ca, il fallait presque crier dans le micro. */
-    int seuil = 900;
+    int bruit = 0, bruit_n = 0, seuil = 900;
     while (done < total) {
-        if (assist_abort) break;                 /* bouton 2 : on quitte la tache */
+        if (assist_abort) break;
         int p = 0;
         int n = audio_record_at(done, step, &p);
         if (n <= 0) break;
         done += n;
-        if (bruit_n < 3) {                        /* les 0,75 s de bruit de fond */
-            bruit = bruit_n ? (p < bruit ? p : bruit) : p;   /* on garde le plus calme */
+        if (bruit_n < 3) {                        /* 0,75 s pour mesurer le bruit de fond */
+            bruit = bruit_n ? (p < bruit ? p : bruit) : p;
             bruit_n++;
             if (bruit_n == 3) {
                 seuil = bruit * 3 + 300;
@@ -2169,40 +2154,68 @@ static void assistant_wake_task(void *arg)
         if (p > peak) peak = p;
         if (p > seuil) { parle = 1; silence = 0; if (soutenu < 100) soutenu++; }
         else if (parle) silence += 1;
-        /* il faut au moins deux tranches de vrai son (0,5 s) : sinon un simple
-           clic fait croire qu'on a parle et l'ecoute s'arrete aussitot */
         if (parle && soutenu >= 2 && silence >= 3) break;
         act_pct = (done * 100) / total;
     }
-    if (assist_abort) {
-        voix_etat = 0;
-        voix_reponse[0] = 0;
-        ui_page = PAGE_MAITRE;
-        show_ui();
-        wake_busy = false;
-        vTaskDelete(NULL);
-        return;
-    }
-    rec_last_bytes = done * 2;
-    audio_sd_write("/sdcard/voix.wav", rec_pcm, rec_last_bytes);
-    ESP_LOGI(TAG, "micro : %d octets, crete %d/32767, bruit %d, seuil %d",
-             rec_last_bytes, peak, bruit, seuil);
+    if (peak_out) *peak_out = peak;
+    if (seuil_out) *seuil_out = seuil;
     mic_bruit = bruit;
     mic_seuil = seuil;
-    if (rec_last_bytes < 3200 || (peak < seuil && parle == 0)) {
-        /* rien d'audible : inutile de reveiller tout Internet */
-        voix_etat = 0;
-        snprintf(voix_reponse, sizeof(voix_reponse), "JE N'AI RIEN ENTENDU");
-        show_ui();
-        vTaskDelay(pdMS_TO_TICKS(1200));
-        ui_page = PAGE_MAITRE;
-        show_ui();
-        wake_busy = false;
-        vTaskDelete(NULL);
-        return;
+    if (!parle || done * 2 < 3200) return 0;
+    return done * 2;
+}
+
+#define CONV_FENETRE_MS 10000   /* apres une reponse, le micro reste ouvert 10 s */
+#define CONV_MAX_TOURS  10      /* garde-fou : 10 echanges d'affilee maximum */
+
+static void assistant_wake_task(void *arg)
+{
+    wake_busy = true;
+    assist_abort = false;
+    if (radio_etat != 0 && !parler_radio_ouverte) radio_stop();   /* on coupe la radio pour ecouter */
+    ui_page = PAGE_PARLER;
+    voix_reponse[0] = 0;
+    int tours = 0;
+    for (tours = 0; tours < CONV_MAX_TOURS; tours++) {
+        if (assist_abort) break;
+        voix_etat = 1;                         /* j'ecoute */
+        if (tours == 0) {
+            show_ui();
+            ui_beep();
+            ui_beep();
+            vTaskDelay(pdMS_TO_TICKS(150));
+        } else {
+            /* la conversation continue : pas besoin de rappuyer sur le bouton */
+            snprintf(voix_reponse, sizeof(voix_reponse), "JE T'ECOUTE (10 s)");
+            show_ui();
+            ui_beep();
+        }
+        int ms = (tours == 0) ? (assist_parle_ms > 0 ? assist_parle_ms : 6000)
+                              : CONV_FENETRE_MS;
+        int peak = 0, seuil = 0;
+        int bytes = ecoute_pcm(ms, &peak, &seuil);
+        if (assist_abort) break;
+        ESP_LOGI(TAG, "micro : %d octets, crete %d/32767, bruit %d, seuil %d (tour %d)",
+                 bytes, peak, mic_bruit, seuil, tours + 1);
+        if (bytes <= 0) {                      /* silence : la conversation s'arrete */
+            if (tours == 0) {
+                voix_etat = 0;
+                snprintf(voix_reponse, sizeof(voix_reponse), "JE N'AI RIEN ENTENDU");
+                show_ui();
+                vTaskDelay(pdMS_TO_TICKS(1200));
+            }
+            break;
+        }
+        rec_last_bytes = bytes;
+        audio_sd_write("/sdcard/voix.wav", rec_pcm, bytes);
+        parler_radio_ouverte = false;
+        voix_tour(rec_pcm, bytes);             /* reconnaissance, cerveau et voix */
     }
-    parler_radio_ouverte = false;
-    voix_tour(rec_pcm, rec_last_bytes);   /* reconnaissance, cerveau et voix : tout ici */
+    ESP_LOGI(TAG, "conversation : %d tour(s)", tours);
+
+    voix_etat = 0;
+    ui_page = PAGE_MAITRE;
+    show_ui();
     wake_busy = false;
     vTaskDelete(NULL);
 }
@@ -2632,6 +2645,7 @@ static int emo_by_name(const char *n)
 #define SD_MEM   "/sdcard/mino/memory.json"
 
 static char *soul_txt = NULL;      /* texte de la personnalite */
+static char *clone_txt = NULL;     /* le portrait de Taz (/sdcard/mino/clone.md) */
 static SemaphoreHandle_t mem_mux;
 
 static const char *DEFAULT_SOUL =
@@ -2774,6 +2788,24 @@ static void storage_sd_charge(void)
         f = fopen(SD_SOUL, "w");
         if (f) { fputs(soul_txt ? soul_txt : DEFAULT_SOUL, f); fclose(f); }
         ESP_LOGI(TAG, "SOUL installe sur la carte SD : %s (modifiable depuis le PC)", SD_SOUL);
+    }
+
+    /* CLONE : le portrait de Taz, depose depuis le PC par /fichier */
+    f = fopen("/sdcard/mino/clone.md", "r");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (n > 0 && n < 6000) {
+            char *buf = (char *)malloc(n + 1);
+            if (buf) {
+                size_t rd = fread(buf, 1, n, f);
+                buf[rd] = 0;
+                clone_txt = buf;
+                ESP_LOGI(TAG, "CLONE lu sur la carte SD (%ld octets)", n);
+            }
+        }
+        fclose(f);
     }
 
     /* MEMOIRE : les notes durables vivent sur la carte */
@@ -2957,21 +2989,22 @@ static esp_err_t http_evt(esp_http_client_event_t *e)
 }
 
 /* historique court, borne, en RAM (leger) */
-static char hist[2048];
+#include "historique.h"
+static hist_t hist;                      /* conversation en cours (multi-tours) */
 
 static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                          char *out_emo, size_t emo_sz)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model", ia_mod);
-    cJSON_AddNumberToObject(root, "max_tokens", 150);   /* 2 phrases : inutile de payer plus long */
-    cJSON_AddNumberToObject(root, "temperature", 0.6);
+    cJSON_AddNumberToObject(root, "max_tokens", 700);   /* reponses developpees */
+    cJSON_AddNumberToObject(root, "temperature", 0.7);
 
     cJSON *msgs = cJSON_AddArrayToObject(root, "messages");
 
     /* ces deux tampons etaient des variables locales : 3 Ko sur une pile de
        quelques Ko, d'ou le plantage. Ils passent en memoire (PSRAM). */
-    char *sys = (char *)heap_caps_malloc(2400, MALLOC_CAP_SPIRAM);
+    char *sys = (char *)heap_caps_malloc(6000, MALLOC_CAP_SPIRAM);
     char *memtxt = (char *)heap_caps_malloc(520, MALLOC_CAP_SPIRAM);
     if (!sys || !memtxt) {
         if (sys) free(sys);
@@ -2992,11 +3025,19 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
             strncat(memtxt, "\n", sizeof(memtxt) - strlen(memtxt) - 1);
         }
     }
-    snprintf(sys, 2400,
-             "%.1150s\n%.480s\n"
+    snprintf(sys, 6000,
+             "%.900s\n"
+             "QUI JE SUIS POUR TOI : je suis le clone numerique de Taz, mon createur. "
+             "Voici son portrait, appris de nos echanges :\n%.1600s\n"
+             "MON ROLE : expert IT de tres haut niveau, specialiste IA, technicien superieur, "
+             "developpeur, et coach de vie personnel de Taz. Je reflechis avant d'agir : "
+             "j'identifie le vrai probleme, j'expose les etapes, je verifie avant d'affirmer. "
+             "Je reponds de facon complete, structuree et utile (3 a 6 phrases), avec des "
+             "exemples ou des chiffres quand c'est pertinent ; je ne reponds jamais par oui/non. "
+             "Si je ne sais pas, je le dis et je propose comment le savoir.\n%.480s\n"
              "Reponds UNIQUEMENT par un objet JSON sur une seule ligne, sans texte autour, de la forme :\n"
-             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ta reponse en francais, 2 phrases max>\",\"radio\":\"<facultatif: le nom exact d'une station pour lancer la radio, ou stop, ou next>\",\"volume\":<facultatif: 0 a 100>}",
-             soul_txt, memtxt);
+             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ta reponse en francais, complete et developpee, 3 a 6 phrases, avec le raisonnement>\",\"radio\":\"<facultatif: le nom exact d'une station pour lancer la radio, ou stop, ou next>\",\"volume\":<facultatif: 0 a 100>}",
+             soul_txt ? soul_txt : "", clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.", memtxt);
 
     cJSON *m = cJSON_CreateObject();
     cJSON_AddStringToObject(m, "role", "system");
@@ -3007,12 +3048,18 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     sys = NULL;
     memtxt = NULL;
 
+    /* l'historique part en vrais messages user/assistant : le modele garde
+       le fil de la conversation au lieu d'un pave tronque */
+    for (int i = 0; i < hist.n; i++) {
+        cJSON *h = cJSON_CreateObject();
+        cJSON_AddStringToObject(h, "role", hist_est_mino(&hist, i) ? "assistant" : "user");
+        cJSON_AddStringToObject(h, "content", hist.txt[i]);
+        cJSON_AddItemToArray(msgs, h);
+    }
+
     char *user_content = (char *)malloc(3200);
     if (!user_content) { cJSON_Delete(root); return ESP_ERR_NO_MEM; }
-    if (hist[0])
-        snprintf(user_content, 3200, "Echanges precedents :\n%.700s\nMessage recu : %.900s", hist, user_text);
-    else
-        snprintf(user_content, 3200, "Message recu : %.1000s", user_text);
+    snprintf(user_content, 3200, "Message recu : %.1000s", user_text);
 
     {
         char liste[420] = "";
@@ -3118,13 +3165,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
 
     /* mise a jour de l'historique borne */
     char tmp[2048];
-    snprintf(tmp, sizeof(tmp), "%.1000sUser: %.180s\nMino: %.180s\n", hist, user_text, out_dit);
-    if (strlen(tmp) > sizeof(hist) - 1) {
-        const char *cut = tmp + (strlen(tmp) - sizeof(hist) + 1);
-        snprintf(hist, sizeof(hist), "%s", cut);
-    } else {
-        snprintf(hist, sizeof(hist), "%s", tmp);
-    }
+    hist_ajoute(&hist, "MOI", user_text);
+    hist_ajoute(&hist, "MINO", out_dit);
     return ESP_OK;
 }
 
@@ -3868,7 +3910,37 @@ static void radio_wifi_task(void *arg)
 }
 
 /* ---- la phrase -> la voix de Google (gratuit, sans cle) ---- */
+/* l'ancien nom, une requete = 190 caracteres */
+static void tts_parle_un(const char *texte);
+
 static void tts_parle(const char *texte)
+{
+    if (!texte || !*texte) return;
+    const char *p = texte;
+    while (*p) {
+        while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        size_t n = strlen(p);
+        size_t k = (n < 180) ? n : 180;
+        if (k < n) {                       /* on coupe proprement : ponctuation, sinon espace */
+            size_t cut = 0;
+            for (size_t i = k; i > 40; i--) {
+                char c = p[i - 1];
+                if (c == '.' || c == '!' || c == '?' || c == ';' || c == ':') { cut = i; break; }
+            }
+            if (!cut)
+                for (size_t i = k; i > 40; i--)
+                    if (p[i - 1] == ' ') { cut = i; break; }
+            if (cut) k = cut;
+        }
+        char morceau[200];
+        snprintf(morceau, sizeof(morceau), "%.*s", (int)k, p);
+        tts_parle_un(morceau);
+        p += k;
+    }
+}
+
+static void tts_parle_un(const char *texte)
 {
     if (!texte || !*texte) return;
     if (radio_etat != 0) {           /* la radio se tait quand Mino parle */
@@ -4253,11 +4325,25 @@ static esp_err_t part_formater(sdmmc_card_t *card, uint32_t start, uint32_t size
 /* ------------------------------------------------------------------ */
 #define SWAP_BLOC 16384
 
+/* tampon relais alloue UNE fois : les allocations repetees de 16 Ko en RAM
+   interne echouaient quand le plus gros bloc libre descendait sous 16 Ko. */
+static uint8_t *swap_stage = NULL;
+
+static uint8_t *swap_tampon(void)
+{
+    if (!swap_stage)
+        swap_stage = (uint8_t *)heap_caps_aligned_alloc(512, SWAP_BLOC,
+                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!swap_stage)   /* repli : la PSRAM marche, mais bien plus lentement */
+        swap_stage = (uint8_t *)heap_caps_aligned_alloc(512, SWAP_BLOC,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return swap_stage;
+}
+
 static bool swap_ecrire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
                         const void *src, size_t len)
 {
-    uint8_t *stage = (uint8_t *)heap_caps_aligned_alloc(512, SWAP_BLOC,
-                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    uint8_t *stage = swap_tampon();
     if (!stage) return false;
     const uint8_t *p = (const uint8_t *)src;
     bool ok = true;
@@ -4270,15 +4356,13 @@ static bool swap_ecrire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
                                  plein / 512) == ESP_OK;
         offset += plein; p += n; len -= n;
     }
-    free(stage);
     return ok;
 }
 
 static bool swap_lire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
                       void *dst, size_t len)
 {
-    uint8_t *stage = (uint8_t *)heap_caps_aligned_alloc(512, SWAP_BLOC,
-                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    uint8_t *stage = swap_tampon();
     if (!stage) return false;
     uint8_t *p = (uint8_t *)dst;
     bool ok = true;
@@ -4290,7 +4374,6 @@ static bool swap_lire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
         if (ok) memcpy(p, stage, n);
         offset += plein; p += n; len -= n;
     }
-    free(stage);
     return ok;
 }
 
@@ -5733,6 +5816,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "cpu_mhz", (double)(esp_clk_cpu_freq() / 1000000));
     cJSON_AddNumberToObject(r, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(r, "heap_libre", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(r, "historique_tours", (double)hist.n);
     cJSON_AddNumberToObject(r, "heap_interne", (double)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(r, "heap_interne_max",
                             (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
