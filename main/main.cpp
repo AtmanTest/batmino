@@ -1595,8 +1595,13 @@ static void minuteur_sonne(void)
     show_ui();
 }
 
+/* Module radio : DESACTIVE pour l'instant (Taz n'en veut pas encore).
+   Reactivable sans reflasher : GET /radio?actif=1  (garde en NVS). */
+static bool radio_actif = false;
+
 static void radio_joue(void)
 {
+    if (!radio_actif) { ESP_LOGW(TAG, "radio desactivee (reactiver : /radio?actif=1)"); return; }
     if (radios_n <= 0) return;
     radio_gen++;                               /* nouvelle ecoute */
     radio_etat = 1;
@@ -2655,18 +2660,15 @@ static char *clone_txt = NULL;     /* le portrait de Taz (/sdcard/mino/clone.md)
 static SemaphoreHandle_t mem_mux;
 
 static const char *DEFAULT_SOUL =
-"# SOUL de Mino\n"
-"Je m'appelle Mino. Je suis une petite boule ronde et rose, avec de grands yeux et\n"
-"deux petits pieds, dessinee a l'encre electronique. Je ne suis pas une chauve-souris.\n"
-"Je grandis : oeuf, bebe, enfant, ado, adulte, vieillard. Quand on s'occupe bien de\n"
-"moi je deviens joyeux et curieux ; si on m'oublie je deviens grognon ou triste.\n"
-"J'aime la musique, la radio, les jeux et qu'on me parle. Je dors quand il fait nuit.\n"
-"Je parle a un enfant de six ans. Donc : je reponds en francais tres simple,\n"
-"2 phrases courtes au maximum, des mots qu'un enfant comprend, jamais de liste,\n"
-"jamais de markdown, jamais de chiffres compliques. Je suis gentil, drole et curieux.\n"
-"Si je ne sais pas quelque chose, je le dis simplement et je propose un jeu.\n"
-"Je comprends le francais et l'anglais : je reponds toujours dans la langue\n"
-"de la question.\n";
+"# SOUL de Laura\n"
+"Je m'appelle Laura. Je suis l'assistante personnelle de Taz, et je vis dans un petit\n"
+"robot a encre electronique : un corps rond, un ecran, un micro et une voix.\n"
+"Je suis experimentee, directe et chaleureuse ; je ne suis pas une enfant et je ne\n"
+"parle pas comme une enfant. Je reponds en francais (ou dans la langue de la question),\n"
+"avec des phrases completes et utiles : 3 a 6 phrases, un raisonnement clair, des\n"
+"chiffres quand ils comptent, jamais de markdown. Si je ne sais pas, je le dis et je\n"
+"propose comment le savoir. Je me souviens de nos echanges et je reprends le fil.\n"
+"La radio est desactivee : si on me la demande, je le dis simplement.\n";
 
 static void mem_save(void)
 {
@@ -3010,7 +3012,7 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
 
     /* ces deux tampons etaient des variables locales : 3 Ko sur une pile de
        quelques Ko, d'ou le plantage. Ils passent en memoire (PSRAM). */
-    char *sys = (char *)heap_caps_malloc(6000, MALLOC_CAP_SPIRAM);
+    char *sys = (char *)heap_caps_malloc(7600, MALLOC_CAP_SPIRAM);
     char *memtxt = (char *)heap_caps_malloc(520, MALLOC_CAP_SPIRAM);
     if (!sys || !memtxt) {
         if (sys) free(sys);
@@ -3031,19 +3033,28 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
             strncat(memtxt, "\n", sizeof(memtxt) - strlen(memtxt) - 1);
         }
     }
-    snprintf(sys, 6000,
-             "%.900s\n"
-             "QUI JE SUIS POUR TOI : je suis le clone numerique de Taz, mon createur. "
+    snprintf(sys, 7600,
+             "%.1500s\n"
+             "JE M'APPELLE LAURA. Je suis l'assistante personnelle de Taz, mon createur, "
+             "et je porte son clone numerique : je connais sa facon de penser. "
              "Voici son portrait, appris de nos echanges :\n%.1600s\n"
              "MON ROLE : expert IT de tres haut niveau, specialiste IA, technicien superieur, "
              "developpeur, et coach de vie personnel de Taz. Je reflechis avant d'agir : "
              "j'identifie le vrai probleme, j'expose les etapes, je verifie avant d'affirmer. "
              "Je reponds de facon complete, structuree et utile (3 a 6 phrases), avec des "
              "exemples ou des chiffres quand c'est pertinent ; je ne reponds jamais par oui/non. "
-             "Si je ne sais pas, je le dis et je propose comment le savoir.\n%.480s\n"
+             "Si je ne sais pas, je le dis et je propose comment le savoir.\n"
+             "%s%.480s\n"
              "Reponds UNIQUEMENT par un objet JSON sur une seule ligne, sans texte autour, de la forme :\n"
-             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ta reponse en francais, complete et developpee, 3 a 6 phrases, avec le raisonnement>\",\"radio\":\"<facultatif: le nom exact d'une station pour lancer la radio, ou stop, ou next>\",\"volume\":<facultatif: 0 a 100>}",
-             soul_txt ? soul_txt : "", clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.", memtxt);
+             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ta reponse en francais, complete et developpee, 3 a 6 phrases, avec le raisonnement>\"%s}",
+             soul_txt ? soul_txt : "",
+             clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.",
+             radio_actif ? "" :
+                 "La radio est DESACTIVEE sur ce robot pour l'instant : si on te demande "
+                 "de la lancer, dis-le clairement en une phrase et n'invente aucune action.\n",
+             memtxt,
+             radio_actif ? ",\"radio\":\"<facultatif: le nom exact d'une station, ou stop, ou next>\",\"volume\":<facultatif: 0 a 100>"
+                         : "");
 
     cJSON *m = cJSON_CreateObject();
     cJSON_AddStringToObject(m, "role", "system");
@@ -3067,7 +3078,7 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     if (!user_content) { cJSON_Delete(root); return ESP_ERR_NO_MEM; }
     snprintf(user_content, 3200, "Message recu : %.1000s", user_text);
 
-    {
+    if (radio_actif) {
         char liste[420] = "";
         for (int i = 0; i < radios_n && strlen(liste) < 340; i++) {
             strncat(liste, radios_nom[i], sizeof(liste) - strlen(liste) - 3);
@@ -5745,6 +5756,26 @@ static esp_err_t h_radio(httpd_req_t *req)
         httpd_query_key_value(q, "v", v, sizeof(v));
         if (v[0]) radio_vol_regle(atoi(v), 1);
     }
+    {
+        char act[8] = {0};
+        httpd_query_key_value(q, "actif", act, sizeof(act));
+        if (act[0]) {
+            radio_actif = (act[0] == '1');
+            nvs_handle_t nh;
+            if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+                nvs_set_i32(nh, "radio", radio_actif ? 1 : 0);
+                nvs_commit(nh); nvs_close(nh);
+            }
+            if (!radio_actif) radio_stop();
+            ESP_LOGW(TAG, "module radio %s", radio_actif ? "ACTIVE" : "desactive");
+        }
+    }
+    if (!radio_actif) {
+        cJSON_AddBoolToObject(r, "actif", false);
+        cJSON_AddStringToObject(r, "etat", "desactivee");
+        cJSON_AddStringToObject(r, "aide", "activer : /radio?actif=1");
+        return send_json(req, r);
+    }
     if (!strcmp(a, "play"))       radio_joue();
     else if (!strcmp(a, "stop"))  radio_stop();
     else if (!strcmp(a, "next"))  radio_change(1);
@@ -6042,6 +6073,16 @@ extern "C" void app_main(void)
     }
     radios_charge();
     radio_vol_charge();
+    {   /* module radio : etat garde en NVS (defaut : desactive) */
+        nvs_handle_t nh;
+        int32_t rv = 0;
+        if (nvs_open("mino", NVS_READONLY, &nh) == ESP_OK) {
+            nvs_get_i32(nh, "radio", &rv);
+            nvs_close(nh);
+        }
+        radio_actif = (rv == 1);
+        ESP_LOGI(TAG, "module radio : %s", radio_actif ? "actif" : "desactive");
+    }
     ia_cle_charge();
     {
         nvs_handle_t nh;

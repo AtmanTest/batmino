@@ -107,6 +107,19 @@ Test a distance : `/bouton?n=0|1&m=court|long|double`, `/bouton?p=0..3`.
 - Endpoints ajoutes : `/swap` (etat + `op=bench&bloc=K&mo=N`), `/sdformat?f=1`
   (reformate vraiment), `/sd?p=/dossier` (listing JSON nom/taille/lisible).
 
+## Laura, et la radio desactivee (v0.8)
+
+L'assistante s'appelle **Laura**. Son SOUL vit sur la carte
+(`/sdcard/mino/soul.md`, ~1,6 Ko) et `DEFAULT_SOUL` sert de repli : les deux
+parlent d'une adulte experte, plus d'un enfant de six ans. Le prompt systeme
+n'envoie que `%.1500s` du SOUL — un SOUL plus long est tronque en silence (c'est
+ce qui a fait disparaitre la consigne radio).
+
+Module radio : `radio_actif` (NVS, cle `radio`, defaut desactive). Garde dans
+`radio_joue()`, interrupteur `/radio?actif=1|0`, et le prompt perd la liste des
+stations + le champ `radio` du JSON quand c'est coupe. Sans cette consigne
+explicite, le modele inventait des actions (« je lance la radio… »).
+
 ## Conversation continue, clone et historique (v0.7)
 
 `assistant_wake_task()` boucle : un appui lance le 1er tour, puis le micro se
