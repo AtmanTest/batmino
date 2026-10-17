@@ -107,6 +107,28 @@ Test a distance : `/bouton?n=0|1&m=court|long|double`, `/bouton?p=0..3`.
 - Endpoints ajoutes : `/swap` (etat + `op=bench&bloc=K&mo=N`), `/sdformat?f=1`
   (reformate vraiment), `/sd?p=/dossier` (listing JSON nom/taille/lisible).
 
+## RAM interne : le piege qui casse la voix (v0.6)
+
+Symptomes : le bouton ne fait rien, ou "je n'ai pas bien compris", ou TTS -1.
+Journal : `mbedtls_ssl_handshake returned -0x3000` / `mbedtls_ssl_setup
+returned -0x7F00` = MBEDTLS_ERR_SSL_ALLOC_FAILED (PAS un probleme de certificat,
+ne pas desactiver la verification).
+
+Cause : RAM interne saturee (~11 Ko libres, plus gros bloc 4 Ko). Le serveur
+HTTP reservait 7 sockets x 16 Ko de pile = 112 Ko, et `xTaskCreate(16384)` du
+reveil echouait en SILENCE (retour non teste -> bouton muet).
+
+Regles a garder :
+- `cfg.max_open_sockets = 2` et pile httpd 12 Ko (TLS tient dedans).
+- piles de taches lourdes en PSRAM : `xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM)`
+  + `CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y`, et TOUJOURS tester le retour.
+- `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` (pas 16384) : les tampons TLS de
+  16 Ko peuvent ainsi aller en PSRAM.
+- `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` et `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`.
+- Diagnostiquer avec `/state` : `heap_interne`, `heap_interne_max`, `heap_dma_max`
+  (sain : >30 Ko libres, plus gros bloc >16 Ko).
+- Tester cerveau+voix sans parler : `/dit?t=texte` (ni micro ni STT).
+
 ## Carte repartitionnee (v0.5) : FAT32 93 Go + zone brute 23,9 Go
 
 Etat actuel de la carte : MBR 2 partitions, p1 = FAT32 (0x0C, LBA 2048, 93 Go,
