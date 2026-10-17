@@ -6,7 +6,10 @@ qui vit sa vie (tamagotchi déterministe calculé sur la carte), parle, écoute 
 répond en Wi-Fi — micro → STT (Groq whisper) → LLM (Groq / DeepSeek) → TTS
 (Google Traduction), le tout sur la carte, sans PC.
 
-Deux boutons : appui court = menu / page suivante, appui long 2 s = parler.
+Deux boutons, quatre gestes : appui court du bouton 1 = lancer la tâche de l'écran
+courant (chat vocal sur l'accueil, radio, minuteur…), appui court du bouton 2 =
+abandonner la tâche et changer de page, appui long = inchangé pour l'instant,
+double appui = détecté et réservé pour la suite.
 
 ## Démarrer
 
@@ -43,5 +46,14 @@ g++ -O2 -o preview preview.cpp ../main/art.cpp ../main/petart.cpp ../main/pet.cp
 /say?emotion=<famille>&text=...
 /pet?a=manger|jouer|calin|nettoyer|soigner|dormir|reveiller
 /soul /note /rec /play /radio /infos /mic /tts /timer /minuteur /modele
-/langue /cle /bouton /parle /sd /sdformat /spiffs /sdcard
+/langue /cle /bouton?n=0|1&m=court|long|double /parle /spiffs
+/sd?p=/dossier    liste JSON {nom, taille, lisible}
+/sdformat?f=1     reformate la carte (FAT32 pleine carte)
+/fichier?p=/chemin  GET = telecharge, POST = ecrit (sauvegardes par Wi-Fi)
+/part?op=info|repart&fat_go=N|restore|rawtest|rawbench&bloc=K|st&n=Mo
+/swap             etat de l'espace libre + bench FATFS (op=bench|fatfs&bloc=K)
 ```
+
+La carte est partitionnee : FAT32 de 93 Go pour les fichiers + 23,9 Go de zone
+brute servant de memoire de debordement (3,4 Mo/s contre 0,37 via FATFS).
+Voir `README-BATMINO.md`, section « La carte SD ».

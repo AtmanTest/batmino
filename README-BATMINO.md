@@ -26,10 +26,19 @@ en noir et blanc, et qui parle.
 Le rendu est **partagé** : `art.cpp`/`petart.cpp` se compilent côté carte et côté
 PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
 
-## Interface : deux boutons, deux gestes
+## Interface : deux boutons, quatre gestes
 
-    APPUI COURT : bouton 1 = menu / élément suivant ; bouton 2 = valider / page
-    APPUI LONG  : PARLER (assistant vocal), depuis n'importe quel écran
+    APPUI COURT bouton 1 : lance la tache de l'ecran courant
+                           (accueil/parler -> chat vocal, radio -> jouer/arreter,
+                            minuteur -> creer/valider)
+    APPUI COURT bouton 2 : abandonne la tache en cours (l'ecoute est coupee
+                           proprement) et passe a la page suivante ; sur la
+                           derniere page, retour a l'accueil
+    APPUI LONG           : reserve, pas encore d'action
+    DOUBLE APPUI         : detecte (< 400 ms) et reserve pour la suite, sans
+                           rejouer l'action de l'appui simple
+
+Testable a distance : `/bouton?n=0|1&m=court|long|double`.
 
 Pages : MONDE (0, le tamagotchi en train de vivre), VISAGE (1, la tête en grand
 avec les 73 expressions), HORLOGE, CAPTEURS, RÉGLAGES, SÉCU, JOURNAL, AIDE.
@@ -59,38 +68,63 @@ Vérifié hors carte : `tools/pettest.cpp` rejoue des jours en secondes —
 avec des soins parfaits le personnage survit et devient héros, sans soin il
 part en 12 h avec 8 fautes de soin, et la sauvegarde fait un aller-retour.
 
-## La carte SD (128 Go)
+## La carte SD (128 Go), partitionnee
+
+La carte porte maintenant deux partitions (ecrites par le firmware, `/part`) :
+
+    p1  FAT32   93,1 Go   LBA 2048        montee sur /sdcard
+    p2  brute   23,9 Go   LBA 195313664   zone d'echange, hors FAT
+
+Fichiers sur la partition FAT :
 
     /sdcard/mino/pet.txt        sauvegarde de l'état (reprise après coupure)
     /sdcard/mino/journal-*.md   journal du jour, une ligne par événement
     /sdcard/mino/soul.md        la personnalité, modifiable depuis le PC
     /sdcard/mino/memory.json    notes durables apprises
     /sdcard/voix.wav            dernière prise du micro
+    /sdcard/backup/*.tar.gz     sauvegardes completes (source + git bundle)
+
+Debits mesures sur cette carte (bus 1 bit, 40 MHz — seule cette largeur est
+cablee sur la Waveshare) :
+
+    FATFS (fichiers)                  0,37 Mo/s ecriture | 1,6 Mo/s lecture
+    zone brute, tampon relais 16 Ko   3,4 Mo/s ecriture  | 3,5 Mo/s lecture
+    zone brute, tampon 64-256 Ko PSRAM 0,4-0,6 Mo/s (le tampon PSRAM casse le DMA)
+
+La taille de bloc FATFS ne change rien (0,37 Mo/s de 4 a 256 Ko) : le plafond
+vient de FATFS, pas de la carte ni du bus (4,65 Mo/s en secteurs bruts).
+
+Cette zone n'est **pas un swap systeme** : l'ESP32-S3 n'a pas de MMU, donc
+aucune pagination. C'est un stockage explicite, utilise par `swap_ecrire()` /
+`swap_lire()` (blocs de 16 Ko, memcpy PSRAM <-> carte).
+
+    /part?op=info        etat des partitions
+    /part?op=repart&fat_go=100   repartitionne (DESTRUCTIF) puis formate la FAT32
+    /part?op=restore     retour a une carte entiere en FAT32
+    /part?op=st&n=4      ecrit puis relit n Mo dans la zone d'echange (verifie)
+    /part?op=rawbench&bloc=K     debit brut de la zone
 
 La flash interne (SPIFFS, 1,5 Mo) ne sert plus que de secours : tout ce qui
 compte vit sur la carte.
 
 ## L'assistant vocal
 
-Le robot ne fait qu'une chose : appuyer 2 secondes, enregistrer, déposer
-`/sdcard/voix.wav` et prévenir sur le câble. C'est le PC qui réfléchit.
+Tout se passe sur la carte, sans PC : micro -> WAV en PSRAM -> Groq
+(whisper-large-v3-turbo) -> texte -> DeepSeek/Groq (chat) -> reponse -> TTS
+(Google Traduction) -> haut-parleur. Le modele et les cles se changent par
+`/cle` et `/modele` (stockes en NVS, pas dans le binaire).
 
-    assistant 1. appui 2 s sur un bouton -> "PARLE MAINTENANT" (le micro s'ouvre,
-                  l'enregistrement s'arrête seul après 1 s de silence, max 6 s)
-               2. "JE REFLECHIS" -> whisper transcrit, DeepSeek répond,
-                  edge-tts renvoie la voix dans le haut-parleur
-               3. si aucun PC n'est branché : "BRANCHE MON CABLE USB !"
+    appui court bouton 1 sur l'accueil -> "PARLE MAINTENANT" (le micro s'ouvre,
+    l'enregistrement s'arrete seul apres 1 s de silence, max 6 s)
+      -> "JE REFLECHIS" -> la reponse s'affiche et se dit
+    appui court bouton 2 -> l'ecoute est coupee proprement, page suivante
 
-Côté PC, le cerveau est un service utilisateur qui se relance tout seul (c'est
-l'ancien point de rupture : le câble qui bouge tuait `assistant.py`) :
+Si le Wi-Fi manque, la carte le dit a l'ecran au lieu d'attendre.
 
-    systemctl --user status mino-cerveau
-    tail -f /home/taz/mino-app/cerveau.log
-    bash /home/taz/mino-app/cerveau.sh      (à la main)
+L'ancien cerveau PC (`mino-cerveau`) n'est plus necessaire ; s'il tourne encore
+il faut l'arreter, il tient le port serie :
 
-**Le port série est exclusif** : pour dumper l'écran avec `talk.py`, il faut
-`systemctl --user stop mino-cerveau` d'abord, sinon le cerveau mange les
-octets du dump.
+    systemctl --user stop mino-cerveau
 
 ## Anti-ghosting
 
