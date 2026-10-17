@@ -2132,6 +2132,12 @@ static volatile bool assist_abort = false;   /* bouton 2 : on abandonne l'ecoute
 static int ecoute_pcm(int ms_max, int *peak_out, int *seuil_out)
 {
     const int step = 4000;                       /* 0,25 s a 16 kHz */
+    /* on jette ~0,3 s : la fin du haut-parleur et le bip du bouton, sinon le
+       robot s'entend lui-meme et croit qu'on vient de parler */
+    {
+        static uint8_t poubelle[1024];
+        for (int i = 0; i < 19; i++) audio_playback_read(poubelle, sizeof(poubelle));
+    }
     const int total = ms_max * 16;
     int done = 0, peak = 0, silence = 0, parle = 0, soutenu = 0;
     int bruit = 0, bruit_n = 0, seuil = 900;
