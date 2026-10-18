@@ -2098,23 +2098,21 @@ static void draw_app_sys(void)
     char b[64], v[80];
     int pct;
 
-    /* ---- bandeau ---- */
-    a_text(6, 3, 2, "SYSTEM");
-    {
-        int up = (int)(esp_timer_get_time() / 1000000);
-        snprintf(b, sizeof(b), "UP %02d:%02d", up / 3600, (up / 60) % 60);
-        a_text(194 - a_text_w(1, b), 4, 1, b);
-    }
-    a_hline(4, 195, 16, 1);
+    /* ---- en-tete ---- */
+    a_text(6, 2, 3, "SYSTEM");
+    a_text(194 - a_text_w(2, "GPU AUCUN"), 6, 2, "GPU AUCUN");
+    a_hline(4, 195, 19, 1);
 
-    /* ---- CPU ---- */
-    a_text(6, 21, 1, "CPU");
+    /* ---- CPU : le gros chiffre d'abord, c'est ce qu'on lit de loin ---- */
+    a_text(6, 24, 2, "CPU");
     snprintf(v, sizeof(v), "%d.%d%%", sys_cpu10 / 10, sys_cpu10 % 10);
-    a_text(28, 18, 3, v);
-    snprintf(b, sizeof(b), "%d MHZ", (int)(esp_clk_cpu_freq() / 1000000));
-    a_text(194 - a_text_w(1, b), 21, 1, b);
+    a_text(40, 19, 4, v);
+    snprintf(b, sizeof(b), "%dMHZ", (int)(esp_clk_cpu_freq() / 1000000));
+    a_text(194 - a_text_w(2, b), 24, 2, b);
+
+    /* le graphe, 38 colonnes de 4 px sur 28 px de haut */
     {
-        int x0 = 6, y0 = 36, h = 18;
+        int x0 = 4, y0 = 44, h = 28;
         for (int i = 0; i < SYS_HIST; i++) {
             int val = 0;
             if (i < sys_hist_n) {
@@ -2128,89 +2126,74 @@ static void draw_app_sys(void)
         }
         a_hline(x0, x0 + SYS_HIST * 5 - 2, y0 + h, 1);
     }
+    a_hline(4, 195, 74, 1);
 
     /* ---- RAM interne ---- */
     {
         int lib = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         int tot = (int)heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
         pct = tot > 0 ? (tot - lib) * 100 / tot : 0;
-        a_text(6, 61, 1, "RAM");
-        sys_ko(b, sizeof(b), (uint32_t)(lib / 1024));
-        snprintf(v, sizeof(v), "%s LIBRES", b);
-        a_text(194 - a_text_w(1, v), 61, 1, v);
-        sys_barre(6, 69, 188, 6, pct);
+        a_text(6, 79, 2, "RAM");
+        snprintf(v, sizeof(v), "%uK/%uK", (unsigned)(lib / 1024), (unsigned)(tot / 1024));
+        a_text(194 - a_text_w(2, v), 79, 2, v);
+        sys_barre(4, 92, 192, 8, pct);
     }
+
     /* ---- PSRAM ---- */
     {
         int lib = (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         int tot = (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
         pct = tot > 0 ? (tot - lib) * 100 / tot : 0;
-        a_text(6, 80, 1, "PSRAM");
-        sys_ko(b, sizeof(b), (uint32_t)(lib / 1024));
-        snprintf(v, sizeof(v), "%s LIBRES", b);
-        a_text(194 - a_text_w(1, v), 80, 1, v);
-        sys_barre(6, 88, 188, 6, pct);
+        a_text(6, 104, 2, "PSRAM");
+        snprintf(v, sizeof(v), "%.1fM/%.0fM", lib / 1048576.0, tot / 1048576.0);
+        a_text(194 - a_text_w(2, v), 104, 2, v);
+        sys_barre(4, 117, 192, 8, pct);
     }
 
-    /* ---- GPU (il n'y en a pas) + consommation ---- */
-    a_text(6, 101, 1, "GPU  AUCUN");
-    snprintf(v, sizeof(v), "%.2f W", conso_mw() / 1000.0);
-    a_text(194 - a_text_w(2, v), 99, 2, v);
-
-    /* ---- batterie ---- */
+    /* ---- watts et batterie, en gros ---- */
     {
+        snprintf(v, sizeof(v), "%.2fW", conso_mw() / 1000.0);
+        a_text(6, 130, 3, v);
         int mv = sys_bat_mv();
         int bp = sys_bat_pct(mv);
         sys_bat_mv_cache = mv;
         sys_bat_pct_cache = bp;
-        a_text(6, 117, 1, "BATTERIE");
-        if (bp < 0) {
-            a_text(120, 115, 2, "USB");
-        } else {
-            snprintf(v, sizeof(v), "%d%% %.2fV", bp, mv / 1000.0);
-            a_text(194 - a_text_w(2, v), 115, 2, v);
-            sys_barre(6, 126, 188, 6, bp);
-        }
+        snprintf(v, sizeof(v), "%s", bp < 0 ? "USB" : "");
+        if (bp >= 0) snprintf(v, sizeof(v), "BAT %d%%", bp);
+        a_text(194 - a_text_w(3, v), 130, 3, v);
+        if (bp >= 0) sys_barre(4, 149, 192, 8, bp);
     }
 
     /* ---- reseau ---- */
-    {
-        a_text(6, 137, 1, "RESEAU");
-        snprintf(v, sizeof(v), "V %d.%dK  ^ %d.%dK", sys_rx_s / 1024, (sys_rx_s % 1024) / 102,
-                 sys_tx_s / 1024, (sys_tx_s % 1024) / 102);
-        a_text(194 - a_text_w(1, v), 137, 1, v);
-    }
+    a_text(6, 161, 2, "NET");
+    snprintf(v, sizeof(v), "V%dK ^%dK", sys_rx_s / 1024, sys_tx_s / 1024);
+    a_text(194 - a_text_w(2, v), 161, 2, v);
 
-    /* ---- stockage ---- */
+    /* ---- stockage : la carte SD et la flash interne, cote a cote ---- */
     {
         uint64_t tot = 0, lib = 0;
-        a_text(6, 149, 1, "SD");
-        if (sd_ok && esp_vfs_fat_info("/sdcard", &tot, &lib) == ESP_OK && tot) {
-            snprintf(v, sizeof(v), "%.0f / %.0f GO", (tot - lib) / 1073741824.0,
-                     tot / 1073741824.0);
-            a_text(194 - a_text_w(1, v), 149, 1, v);
-            sys_barre(6, 157, 188, 6, (int)((tot - lib) * 100 / tot));
-        } else {
-            a_text(194 - a_text_w(1, "ABSENTE"), 149, 1, "ABSENTE");
-        }
-    }
-    {
         size_t st = 0, su = 0;
-        a_text(6, 168, 1, "FLASH");
-        if (esp_spiffs_info("storage", &st, &su) == ESP_OK && st) {
-            snprintf(v, sizeof(v), "%u / %u KO", (unsigned)(su / 1024), (unsigned)(st / 1024));
-            a_text(194 - a_text_w(1, v), 168, 1, v);
-            sys_barre(6, 176, 188, 6, (int)(su * 100 / st));
-        }
-    }
+        int sd_p = -1, fl_p = -1;
 
-    /* ---- pied ---- */
-    a_hline(4, 195, 186, 1);
-    {
-        struct netif *n = netif_default;
-        const char *ip = (n && n->ip_addr.u_addr.ip4.addr) ? ipaddr_ntoa(&n->ip_addr) : "PAS DE WIFI";
-        snprintf(v, sizeof(v), "%.40s", ip);
-        a_text_c(100, 190, 1, v);
+        if (sd_ok && esp_vfs_fat_info("/sdcard", &tot, &lib) == ESP_OK && tot) {
+            sd_p = (int)((tot - lib) * 100 / tot);
+            snprintf(v, sizeof(v), "SD %d/%dG", (int)((tot - lib) / 1073741824ULL),
+                     (int)(tot / 1073741824ULL));
+        } else {
+            snprintf(v, sizeof(v), "SD -");
+        }
+        a_text(6, 174, 2, v);
+
+        if (esp_spiffs_info("storage", &st, &su) == ESP_OK && st) {
+            fl_p = (int)(su * 100 / st);
+            snprintf(b, sizeof(b), "FL %u/%uK", (unsigned)(su / 1024), (unsigned)(st / 1024));
+        } else {
+            snprintf(b, sizeof(b), "FL -");
+        }
+        a_text(194 - a_text_w(2, b), 174, 2, b);
+
+        sys_barre(4, 187, 92, 8, sd_p < 0 ? 0 : sd_p);
+        sys_barre(104, 187, 92, 8, fl_p < 0 ? 0 : fl_p);
     }
 }
 

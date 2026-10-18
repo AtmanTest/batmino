@@ -21,19 +21,24 @@ rien n'a été détruit, /radio et /timer répondent toujours.
 
 ## La page SYSTEM
 
-| ligne | contenu | source |
-|-------|---------|--------|
-| en-tête | SYSTEM + uptime | esp_timer |
-| CPU | % + fréquence + graphe 38 colonnes (historique) | temps d'exécution par tâche (FreeRTOS) |
-| RAM | libres / barre | heap_caps, caps interne |
-| PSRAM | libres / barre | heap_caps, caps SPIRAM |
-| GPU | AUCUN (l'ESP32-S3 n'en a pas) | — |
-| W | consommation estimée | conso_mw() |
-| BATTERIE | % + tension, ou USB si aucune batterie | ADC1 canal 3 = GPIO4, pont 200K/200K, VBAT = 2 x VADC |
-| RESEAU | octets/s montants et descendants | compteurs de l'application (http_get + envoi STT) |
-| SD | occupé / total + barre | esp_vfs_fat_info("/sdcard") |
-| FLASH | SPIFFS occupé / total + barre | esp_spiffs_info("storage") |
-| pied | adresse IP | netif_default |
+Tout est dessine en corps 2 (10 px de haut) et le chiffre du CPU en corps 4
+(20 px) : sur 200x200, le corps 1 (5 px) etait illisible.
+
+| y | contenu |
+|---|---------|
+| 2 | SYSTEM (corps 3) + GPU AUCUN (corps 2) |
+| 19 | CPU (corps 2), le pourcentage en corps 4, la frequence a droite |
+| 44 | graphe CPU : 38 colonnes de 4 px sur 28 px de haut |
+| 79 | RAM : libres / total, barre de 192 px |
+| 104 | PSRAM : libres / total, barre |
+| 130 | watts (corps 3) et BATTERIE en % (corps 3), barre de batterie |
+| 161 | NET : octets/s montants et descendants |
+| 174 | SD et FLASH cote a cote, puis deux barres de 92 px |
+
+Sources : CPU = temps d'execution par tache (FreeRTOS) ; RAM/PSRAM =
+heap_caps ; watts = conso_mw() ; batterie = ADC1 canal 3 (GPIO4, VBAT =
+2 x VADC) ; reseau = compteurs applicatifs ; disques = esp_vfs_fat_info et
+esp_spiffs_info.
 
 ## Memoire : chaque page rend ce qu'elle a pris
 
