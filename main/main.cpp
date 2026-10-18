@@ -3393,6 +3393,8 @@ static esp_err_t h_tts(httpd_req_t *req)
         voix_etat = 3;
         show_ui();
         tts_parle(phrase);
+        voix_etat = 0;
+        show_ui();
         free(phrase);
     }
     httpd_resp_set_type(req, "application/json");
@@ -4139,11 +4141,19 @@ static int tts_mp3_fetch(const char *texte, uint8_t *mp3, int cap)
     return r;
 }
 
-static void tts_lot_tache(void *arg)
+/* telecharge un morceau. ATTENTION : ne jamais appeler tts_lot_tache()
+   directement depuis une tache qui doit continuer : elle fait vTaskDelete(NULL)
+   et le handler HTTP qui l'appelait mourait sans jamais repondre (le socket
+   restait ouvert -> /state muet apres deux appels). */
+static void tts_lot_charge(tts_lot *L)
 {
-    tts_lot *L = (tts_lot *)arg;
     L->len = tts_mp3_fetch(L->txt, L->mp3, TTS_MORCEAU_MAX);
     L->fini = true;
+}
+
+static void tts_lot_tache(void *arg)
+{
+    tts_lot_charge((tts_lot *)arg);
     vTaskDelete(NULL);
 }
 
@@ -4169,7 +4179,7 @@ static tts_lot *tts_lance(tts_lot *L)
     if (xTaskCreateWithCaps(tts_lot_tache, "tts_lot", 12288, L, 5, &th,
                             MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGW(TAG, "voix : tache de telechargement non creee, on le fait ici");
-        tts_lot_tache(L);          /* au pire, on telecharge sur place */
+        tts_lot_charge(L);         /* au pire, on telecharge sur place */
     }
     return L;
 }
@@ -4223,7 +4233,7 @@ static void tts_parle(const char *texte)
 
         if (!prec) {
             /* premier morceau : on attend son mp3 (on n'a rien a jouer) */
-            tts_lot_tache(L);
+            tts_lot_charge(L);
         } else {
             /* on lance le telechargement du suivant AVANT de jouer celui-ci */
             tts_lance(L);
@@ -4252,6 +4262,8 @@ static void voix_dit(const char *phrase)
     voix_etat = 3;
     show_ui();
     tts_parle(phrase);
+    voix_etat = 0;          /* sans ca le compagnon reste "en train de parler" */
+    show_ui();
 }
 
 /* Le petit micro de la carte sort un signal faible : on remonte le niveau avant
