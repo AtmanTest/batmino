@@ -195,7 +195,12 @@ Trois pages : `PAGE_MAITRE` (0), `PAGE_SYS` (1), `PAGE_REG` (2).
 en tache separee, cache trie par RSSI) et un clavier 6x5 pour le mot de passe.
 
 - bouton 1 = suivant, bouton 2 = choisir, long 1 = effacer, long 2 = valider
-  ou remonter, **double appui 1 = sauter 6 touches**.
+  ou remonter, **double appui 1 = sauter 6 touches**, double appui 2 = abandonner
+  la saisie. Dans le menu, appui long 2 quitte les reglages.
+- **Un appui long, c'est 600 ms.** Le seuil etait a 18 x 60 ms = 1,08 s : tout
+  le monde croyait que l'appui long ne marchait pas. Ne pas y toucher sans
+  mesurer, et ecrire la commande en bas de l'ecran (les boutons n'ont pas
+  d'etiquette).
 - Le reseau change a chaud : SSID et mot de passe ecrits en NVS (namespace
   `mino`, cles `ssid`/`pass`). Si la connexion echoue, `wifi_try` repasse aux
   SSID compiles dans `secrets.h` : on ne se coupe jamais les pieds.
