@@ -132,7 +132,9 @@ void draw_bat_grand(int expression);
 /* petite tete ronde pour les listes/menus */
 void ic_bat_small(int cx, int cy, int s);
 /* le petit compagnon rond : c'est le visage de BATMino */
-void draw_kirby(int cx, int cy, int r, int ph, int etat);
+/* bouche < 0 : expression habituelle selon etat.
+   bouche >= 0 : il parle (0 = ferme, 1 = grand ouvert), les yeux restent ouverts. */
+void draw_kirby(int cx, int cy, int r, int ph, int etat, float bouche = -1.0f);
 
 /* ---------------------------------------------------------------- */
 /* UI facon iOS : capsules, anneaux de progression, ecran TIMER     */

@@ -68,6 +68,20 @@ public:
 
     /* envoi direct d'une framebuffer packee 200x200 (1 bit/px, 1=blanc) */
     void EPD_ShowPart(const uint8_t *fb, int len);
+
+    /* rafraichissement PARTIEL d'une bande : n'envoie que la fenetre demandee
+       (y0..y1 inclus), fb etant une image de `stride` octets par ligne.
+       1=blanc, 0=noir. x0 est aligne sur 8. Renvoie le nombre d'octets envoyes. */
+    int EPD_ShowPartWindow(const uint8_t *fb, int x0, int y0, int x1, int y1, int stride);
+    int busy_ko = 0;   /* nombre de fois ou la dalle est restee occupee */
+    /* LA DALLE EST-ELLE BLOQUEE ? Si oui, plus AUCUNE fonction publique ne
+       parle a la dalle : sinon chaque appel repart pour 8 s de BUSY et la
+       dalle reste definitivement ficelee (ecran qui clignote en boucle). */
+    volatile bool panne = false;
+    void EPD_Panne_Reset() { panne = false; busy_ko = 0; }
+    /* idem, avec le choix de la sequence 0x22 (0xCF lent, 0xC7 rapide) */
+    int EPD_ShowPartWindowSeq(const uint8_t *fb, int x0, int y0, int x1, int y1,
+                              int stride, uint8_t seq);
     void EPD_ShowFull(const uint8_t *fb, int len);
     /* image de base : les deux RAM (0x24 + 0x26) recoivent la meme image,
        puis rafraichissement complet. Sans ca, les mises a jour partielles

@@ -4,4 +4,5 @@ idf_component_register(
   driver
   REQUIRES
   driver
+  esp_timer
   INCLUDE_DIRS "./")

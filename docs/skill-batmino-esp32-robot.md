@@ -30,8 +30,38 @@ L'utilisateur `taz` est dans le groupe `uucp` : pas besoin de sudo pour ttyACM0.
 
 Apres un flash `idf.py`, la sortie de boot est deja passee : sans reset on ne capture que la boucle finale.
 
+## Banc d'essai ecran par la console USB
+
+Le firmware accepte des commandes locales (elles ne partent pas au LLM) :
+
+    printf '!st\n' > /dev/ttyACM0     # BUSY, drapeau panne, compteurs
+    !off / !on        rail d'alimentation de la dalle
+    !init             reinitialisation
+    !clear            init + effacement (chronometre)
+    !part4            4 rafraichissements partiels de l'image courante
+    !full / !clean    rafraichissement complet simple / avec LUT pleine
+
+Chaque attente BUSY > 300 ms est journalisee : c'est la mesure de reference
+(1758 ms complet, 573 ms partiel).
+
 ## Pieges deja payes
 
+- **`CONFIG_FREERTOS_HZ=100` : `pdMS_TO_TICKS(5)` vaut ZERO.** Tout
+  `vTaskDelay(pdMS_TO_TICKS(x))` avec x < 10 ne dort pas, il rend seulement la
+  main. Consequence vecue : la boucle d'attente BUSY de l'e-paper tournait a
+  plein CPU, son compteur de securite se declenchait en quelques microsecondes
+  et la dalle etait declaree en panne PENDANT son rafraichissement normal (puis
+  alimentation coupee en plein milieu -> ecran fige). Utiliser `vTaskDelay(1)`
+  (= 1 tick = 10 ms) et mesurer les delais avec `esp_timer_get_time()`.
+- **Chaque rafraichissement de la dalle clignote ~0,6 s** (partiel 573 ms,
+  complet 1758 ms mesures). Il ne faut donc JAMAIS redessiner la page pour une
+  valeur qui change toute seule : la RAM libre affichee dans la barre d'etat
+  suffisait a rendre chaque image differente, donc a faire clignoter l'ecran
+  en boucle. `show_ui()` compare desormais le framebuffer a la derniere image
+  envoyee (`memcmp`) et impose 3 s minimum entre deux images.
+- **`max_uri_handlers`** : a 28, `httpd_register_uri_handler` refusait les
+  derniers URI en silence (`no slots left`), donc /bande et /ecran n'existaient
+  pas. Mis a 40.
 - **Firmware et bench compiles en Debug (`-Og`) par defaut** : `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y`. Pour mesurer du materiel, passer en `CONFIG_COMPILER_OPTIMIZATION_PERF=y` ; c'est aussi le premier levier de perf reel sur mino-fw (pas encore applique la).
 - `fsync(fileno(f))` existe (VFS ESP-IDF, via `unistd.h`) ; `f_sync()` attend un `FIL*` (FATFS brut), pas un `FILE*`.
 - `build/` herite d'un build interrompu = `objdump: returned non-zero exit status 1` sur une lib : `rm -rf build` puis rebuild.

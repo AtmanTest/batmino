@@ -6,6 +6,7 @@
 #include "esp_log.h"
 
 #include "esp_heap_caps.h" 
+#include "esp_timer.h"
 
 static const char *TAG = "driver";
 
@@ -120,10 +121,24 @@ void epaper_driver_display::spi_port_init() {
 
 void epaper_driver_display::read_busy() {
     int busy = lcd_spi_data.busy;
-    while(gpio_get_level((gpio_num_t)busy) == 1) 
+    /* PIEGE PAYE : CONFIG_FREERTOS_HZ=100, donc pdMS_TO_TICKS(5) == 0 et
+       vTaskDelay(0) ne fait que rendre la main -> la boucle tournait a plein
+       CPU et le compteur de securite se declenchait en quelques microsecondes
+       (la dalle etait declaree en panne pendant son rafraichissement normal).
+       vTaskDelay(1) = 1 tick = 10 ms, et le delai se mesure en temps reel. */
+    int64_t t0 = esp_timer_get_time();
+    while(gpio_get_level((gpio_num_t)busy) == 1)
 	{
-        vTaskDelay(pdMS_TO_TICKS(5));   //LOW: idle, HIGH: busy
+        if ((esp_timer_get_time() - t0) > 40000000LL) {   /* 40 s */
+            ESP_LOGE("epd", "BUSY bloquee depuis 40 s -> dalle declaree en panne");
+            busy_ko++;
+            panne = true;
+            return;
+        }
+        vTaskDelay(1);                  //LOW: idle, HIGH: busy
     }
+    int ms = (int)((esp_timer_get_time() - t0) / 1000);
+    if (ms > 300) ESP_LOGW("epd", "BUSY pendant %d ms", ms);
 }
 
 void epaper_driver_display::SPI_SendByte(uint8_t data) {
@@ -234,6 +249,8 @@ void epaper_driver_display::EPD_TurnOnDisplayPart() {
 }
 
 void epaper_driver_display::EPD_Init() {
+    ESP_LOGI("epd", "init : debut (busy=%d)", gpio_get_level((gpio_num_t)lcd_spi_data.busy));
+    panne = false;      /* chemin de reprise : on redonne sa chance a la dalle */
     set_rst_1();
   	vTaskDelay(pdMS_TO_TICKS(50));
   	set_rst_0();
@@ -277,6 +294,7 @@ void epaper_driver_display::EPD_Clear() {
 }
 
 void epaper_driver_display::EPD_Display() {
+    if (panne) return;
     int buffer_len = lcd_spi_data.buffer_len;
     EPD_SendCommand(0x24);
     assert(buffer);
@@ -285,6 +303,7 @@ void epaper_driver_display::EPD_Display() {
 }
 
 void epaper_driver_display::EPD_DisplayPartBaseImage() {
+    if (panne) return;
     int buffer_len = lcd_spi_data.buffer_len;
     EPD_SendCommand(0x24);
     assert(buffer);
@@ -295,6 +314,7 @@ void epaper_driver_display::EPD_DisplayPartBaseImage() {
 }
 
 void epaper_driver_display::EPD_Init_Partial() {
+    if (panne) return;
     set_rst_1();
   	vTaskDelay(pdMS_TO_TICKS(50));
   	set_rst_0();
@@ -328,6 +348,7 @@ void epaper_driver_display::EPD_Init_Partial() {
 }
 
 void epaper_driver_display::EPD_DisplayPart() {
+    if (panne) return;
     EPD_SendCommand(0x24);
     assert(buffer);
     writeBytes(buffer,5000);
@@ -354,6 +375,7 @@ void epaper_driver_display::EPD_DrawColorPixel(uint16_t x, uint16_t y,uint8_t co
 }
 
 void epaper_driver_display::EPD_ShowPart(const uint8_t *fb, int len) {
+    if (panne || !fb) return;
     esp_err_t ret;
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
@@ -369,7 +391,52 @@ void epaper_driver_display::EPD_ShowPart(const uint8_t *fb, int len) {
     EPD_TurnOnDisplayPart();
 }
 
+int epaper_driver_display::EPD_ShowPartWindow(const uint8_t *fb, int x0, int y0,
+                                              int x1, int y1, int stride)
+{
+    return EPD_ShowPartWindowSeq(fb, x0, y0, x1, y1, stride, 0xCF);
+}
+
+int epaper_driver_display::EPD_ShowPartWindowSeq(const uint8_t *fb, int x0, int y0,
+                                                 int x1, int y1, int stride,
+                                                 uint8_t seq)
+{
+    if (panne || !fb) return 0;
+    x0 &= ~7;
+    x1 |= 7;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= Width)  x1 = Width - 1;
+    if (y1 >= Height) y1 = Height - 1;
+    if (x1 < x0 || y1 < y0) return 0;
+
+    int b0 = x0 >> 3, b1 = x1 >> 3;
+    int larg = b1 - b0 + 1;
+    int lignes = y1 - y0 + 1;
+
+    EPD_SetWindows(x0, y0, x1, y1);
+    EPD_SetCursor(x0, y0);
+    EPD_SendCommand(0x24);
+
+    if (x0 == 0 && x1 >= Width - 1) {
+        /* pleine largeur : les lignes se suivent en memoire */
+        writeBytes((uint8_t *)(fb + (size_t)y0 * stride), lignes * stride);
+    } else {
+        for (int y = y0; y <= y1; y++)
+            writeBytes((uint8_t *)(fb + (size_t)y * stride + b0), larg);
+    }
+    /* on n'ecrit QUE la RAM "nouvelle" (0x24), comme EPD_ShowPart : ecrire la
+       meme image dans la RAM "ancienne" (0x26) supprime la comparaison
+       differentielle dont depend le mode partiel (-> dalles grises, fantomes). */
+    EPD_SendCommand(0x22);
+    EPD_SendData(seq);
+    EPD_SendCommand(0x20);
+    read_busy();
+    return lignes * larg;
+}
+
 void epaper_driver_display::EPD_ShowFull(const uint8_t *fb, int len) {
+    if (panne || !fb) return;
     esp_err_t ret;
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
@@ -389,6 +456,7 @@ void epaper_driver_display::EPD_ShowBase(const uint8_t *fb, int len) {
 
 /* rearme le mode partiel sans reset materiel : LUT partielle + option 0x37 */
 void epaper_driver_display::EPD_EnterPartial(void) {
+    if (panne) return;
     EPD_SetLut(WF_PARTIAL_1IN54_0);
     EPD_SendCommand(0x37);
     EPD_SendData(0x00); EPD_SendData(0x00); EPD_SendData(0x00); EPD_SendData(0x00);
@@ -402,6 +470,7 @@ void epaper_driver_display::EPD_EnterPartial(void) {
    on redescend en mode partiel. Efface reellement les traces de l'image
    precedente (contrairement a un enchainement de partiels). */
 void epaper_driver_display::EPD_ShowFullClean(const uint8_t *fb, int len) {
+    if (panne || !fb) return;
     EPD_SetLut(WF_Full_1IN54);
     EPD_SendCommand(0x24);
     writeBytes(fb, len);

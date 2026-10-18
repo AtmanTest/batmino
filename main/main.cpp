@@ -205,6 +205,7 @@ static epaper_driver_display *epd = NULL;
 static SemaphoreHandle_t epd_mux;
 static int refresh_count = 0;
 
+static volatile int voix_etat;   /* etat de la voix (defini plus bas) */
 static void show_ui(void);
 static void tts_parle(const char *texte);   /* la voix : texte -> parole (definie plus bas) */
 static void heure_sauve(void);   /* pour que le prochain demarrage soit a l'heure */
@@ -811,7 +812,7 @@ static void draw_activity(void)
 static void act_show(bool force)
 {
     int64_t now = esp_timer_get_time() / 1000;
-    if (!force && now - act_last_ms < 260) return;
+    if (!force && now - act_last_ms < 900) return;
     act_last_ms = now;
     fb_clear();
     fb_oy = 0;
@@ -828,7 +829,7 @@ static void act_anim_task(void *arg)
     while (act_on) {
         act_tick++;
         act_show(true);
-        vTaskDelay(pdMS_TO_TICKS(450));
+        vTaskDelay(pdMS_TO_TICKS(1100));
     }
     act_anim = false;
     vTaskDelete(NULL);
@@ -940,7 +941,7 @@ static void kirby_promene(void)
         kirby_vx = x0 + (int)(esp_random() % (uint32_t)(x1 - x0 + 1));
         kirby_vy = y0 + (int)(esp_random() % (uint32_t)(y1 - y0 + 1));
     }
-    int px = 7, py = 4;                       /* il avance vite a l'horizontale */
+    int px = 14, py = 8;                      /* il avance vite a l'horizontale */
     if (kirby_x < kirby_vx) kirby_x += (kirby_vx - kirby_x < px) ? (kirby_vx - kirby_x) : px;
     else if (kirby_x > kirby_vx) kirby_x -= (kirby_x - kirby_vx < px) ? (kirby_x - kirby_vx) : px;
     if (kirby_y < kirby_vy) kirby_y += (kirby_vy - kirby_y < py) ? (kirby_vy - kirby_y) : py;
@@ -952,10 +953,12 @@ static void promenade_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(2500));          /* on laisse la carte demarrer */
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(380));
+        /* 2 s : chaque image coute 865 ms et fait clignoter la dalle. A 380 ms
+           (avant), le compagnon produisait un stroboscope permanent. */
+        vTaskDelay(pdMS_TO_TICKS(5000));
         if (!act_on && ui_page == PAGE_MAITRE) {
             kirby_promene();
-            show_ui();
+            show_ui();          /* ne rafraichit que s'il a vraiment bouge */
         }
     }
 }
@@ -980,13 +983,13 @@ static void draw_status_bar(void)
     ring(x + 2, 8, 2, 1, 1);
     g3x5(x + 7, 6, 2, GC5);
 
-    /* frequence du processeur et RAM libre, demandes explicitement */
+    /* frequence du processeur. La RAM libre a ete retiree : elle changeait a
+       chaque mesure, donc l'image different toujours et la dalle se
+       rafraichissait sans arret (clignotement permanent de la page d'accueil). */
     {
         char b[24];
         snprintf(b, sizeof(b), "%dM", (int)(esp_clk_cpu_freq() / 1000000));
         a_text(140, 6, 1, b);
-        snprintf(b, sizeof(b), "%uK", (unsigned)(esp_get_free_heap_size() / 1024));
-        a_text(140, 14, 1, b);
     }
     icon_gear(182, 12, 6, 2);
 }
@@ -1078,6 +1081,47 @@ static const char *JOURS_SEM[] = {"DIMANCHE", "LUNDI", "MARDI", "MERCREDI", "JEU
 static const char *MOIS_AN[] = {"JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN",
                                 "JUILLET", "AOUT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE"};
 
+
+/* ================================================================== */
+/* LA BANDE : le spectre de la voix, a la place du tamagotchi          */
+/* ================================================================== */
+/* L'energie de la voix : RMS par bloc de 40 ms, avec auto-gain. C'est elle qui
+   ouvre la bouche du compagnon. Volontairement tres peu couteux : une somme de
+   carres, pas d'analyse spectrale (un Goertzel 24 bandes ici affamait le CPU et
+   gelait tout le reste). */
+static volatile float voix_bouche = 0.0f;   /* ouverture de la bouche (0..1) */
+static float voix_acc = 0.0f;
+static int   voix_cnt = 0;
+static float voix_gain = 3000.0f;
+
+static void voix_feed(const int16_t *s, int n)
+{
+    if (!s || n <= 0) return;
+    for (int i = 0; i < n; i++) {
+        float x = (float)s[i];
+        voix_acc += x * x;
+        if (++voix_cnt >= 640) {                 /* 40 ms a 16 kHz */
+            float rms = sqrtf(voix_acc / (float)voix_cnt);
+            voix_acc = 0; voix_cnt = 0;
+            if (rms > voix_gain) voix_gain = rms;          /* auto-gain */
+            else voix_gain -= voix_gain * 0.004f;
+            if (voix_gain < 200.0f) voix_gain = 200.0f;
+            float v = rms / voix_gain;
+            if (v > 1.0f) v = 1.0f;
+            float cible = v * 2.0f;                        /* les syllabes fortes ouvrent grand */
+            if (cible > 1.0f) cible = 1.0f;
+            voix_bouche += (cible - voix_bouche) * 0.75f;
+        }
+    }
+}
+
+/* NOTE (18/10) : une tache "visage" animait le compagnon a ~1 image/s dans une
+   fenetre partielle. Mesure : un rafraichissement partiel coute 865 ms ET fait
+   clignoter toute la dalle -> en boucle, c'etait un stroboscope. Supprime : le
+   visage est dessine par la page, et la page n'est rafraichie que lorsque son
+   contenu change reellement (voir fb_identique() dans show_ui). */
+
+/* ---------- 1. LA PAGE PRINCIPALE ---------- */
 static void draw_app_maitre(void)
 {
     time_t now = time(NULL);
@@ -1094,6 +1138,20 @@ static void draw_app_maitre(void)
              MOIS_AN[ti.tm_mon % 12]);
     a_text_c(100, 52, 1, b);
     a_hline(6, 193, 62, 1);
+
+    if (voix_etat != 0) {
+        /* Laura est la : son compagnon passe au premier plan, en grand, et sa
+           bouche suit les syllabes quand elle parle. */
+        a_text(8, 76, 1, "LAURA");
+        int d = (esp_timer_get_time() / 1000) % 1600 < 800;
+        if (d) { for (int dx = 0; dx < 3; dx++) for (int dy = 0; dy < 3; dy++)
+                     px(192 + dx, 76 + dy, 1); }
+        /* pas d'animation possible sur cette dalle : une image fixe par etat */
+        draw_kirby(100, 126, 40, anim_ph, 0,
+                   voix_etat == 3 ? 0.55f : 0.0f);
+        a_hline(6, 193, 188, 1);
+        return;
+    }
 
     /* la meteo du jour */
     ic_temp(22, 82);
@@ -1113,10 +1171,8 @@ static void draw_app_maitre(void)
 
     /* le petit compagnon se promene dans la zone blanche (tache promenade) */
     draw_kirby(kirby_x, kirby_y, 15, anim_ph, kirby_etat());
-    a_text_c(100, 172, 2, FAMILLES[current_emotion]);
 
-    a_hline(6, 193, 184, 1);
-    a_text_c(100, 190, 1, "APPUI LONG : JE T'ECOUTE");
+    a_hline(6, 193, 188, 1);
 }
 
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */
@@ -1176,7 +1232,7 @@ static void draw_app_paroles(void)
 
 /* ---------- 1. PARLER ---------- */
 /* etat de l'assistant : 0 au repos, 1 j'ecoute, 2 je reflechis, 3 je reponds */
-static volatile int voix_etat = 0;
+// voix_etat declare plus haut (ligne 208)
 static char voix_reponse[300] = "";
 static char voix_entendu_txt[300] = "";  /* dernier texte reconnu (lu par /state) */
 static volatile int assist_parle_ms = 8000;   /* duree d'ecoute (8 s par defaut) */
@@ -1884,6 +1940,54 @@ static void draw_page_set(void)
 static int last_drawn_page = -1;      /* pour forcer un refresh complet au changement de page */
 static int partiels = 99;             /* partiels enchaines depuis le dernier refresh complet */
 
+/* ---- anti-clignotement : on n'envoie une image QUE si elle a change ----
+   Un rafraichissement partiel de cette dalle coute 865 ms et fait clignoter
+   tout l'ecran. Avant, la promenade du compagnon appelait show_ui() toutes les
+   380 ms : la dalle flashait donc en continu. On garde une copie de la
+   derniere image envoyee ; contenu identique = aucune commande a la dalle. */
+static uint8_t fb_dernier[FB_LEN];
+static bool fb_valide = false;
+/* Cadence minimale entre deux images : chaque rafraichissement fait clignoter
+   la dalle ~0,5 s (forme d'onde du panneau, il n'y a pas de mode plus doux).
+   En dessous de 3 s d'intervalle, c'est un stroboscope, pas une animation. */
+#define UI_CADENCE_MS 3000
+static int64_t dernier_envoi_ms = 0;
+static int dernier_etat_voix = 0;
+
+/* ---- une dalle bloquee (BUSY reste haut) ne se debloque qu'en la mettant
+   hors tension. Une seule tentative toutes les 10 s, trois au total : au-dela
+   on laisse tomber (ecran fige) plutot que de harceler la dalle. */
+static int64_t ecran_soin_ms = 0;
+static int ecran_soins = 0;
+
+static bool ecran_reprise(void)      /* true si la dalle est utilisable */
+{
+    if (!epd) return false;
+    if (!epd->panne) return true;
+    int64_t now = esp_timer_get_time() / 1000;
+    if (ecran_soins >= 3 || now - ecran_soin_ms < 10000) return false;
+    ecran_soin_ms = now;
+    ecran_soins++;
+    ESP_LOGW(TAG, "ecran : dalle bloquee, coupure d'alimentation (essai %d/3)", ecran_soins);
+    gpio_set_level((gpio_num_t)EPD_PWR_PIN, 1);      /* hors tension */
+    vTaskDelay(pdMS_TO_TICKS(3000));                 /* laisser la dalle se vider */
+    gpio_set_level((gpio_num_t)EPD_PWR_PIN, 0);      /* sous tension */
+    vTaskDelay(pdMS_TO_TICKS(500));
+    epd->EPD_Panne_Reset();
+    epd->EPD_Init();
+    if (epd->panne) return false;
+    epd->EPD_Clear();
+    epd->EPD_Display();
+    epd->EPD_Init_Partial();
+    epd->EPD_ShowBase(fb, FB_LEN);
+    if (epd->panne) return false;
+    fb_valide = false;               /* tout est a redessiner */
+    partiels = 0;
+    last_drawn_page = -1;
+    ESP_LOGI(TAG, "ecran : dalle revenue apres coupure");
+    return true;
+}
+
 static void show_ui(void)
 {
     bool plein;
@@ -1910,7 +2014,27 @@ static void show_ui(void)
                 (partiels >= (ui_page == PAGE_MAITRE ? 40 : 10));
         last_drawn_page = ui_page;
     }
-    xSemaphoreTake(epd_mux, portMAX_DELAY);
+
+    /* rien de neuf a l'ecran : on ne touche pas a la dalle */
+    if (fb_valide && memcmp(fb, fb_dernier, FB_LEN) == 0) {
+        if (pris) xSemaphoreGive(ui_mux);
+        return;
+    }
+    /* changement d'etat (Laura parle/ecoute, changement de page) = prioritaire */
+    bool prioritaire = plein || (voix_etat != dernier_etat_voix);
+    if (!prioritaire && (esp_timer_get_time() / 1000 - dernier_envoi_ms) < UI_CADENCE_MS) {
+        if (pris) xSemaphoreGive(ui_mux);
+        return;
+    }
+    if (!ecran_reprise()) {
+        if (pris) xSemaphoreGive(ui_mux);
+        return;
+    }
+    if (xSemaphoreTake(epd_mux, pdMS_TO_TICKS(8000)) != pdTRUE) {
+        ESP_LOGW(TAG, "ecran : mutex occupe, image sautee");
+        if (pris) xSemaphoreGive(ui_mux);
+        return;
+    }
     if (plein) {
         /* l'e-paper garde la trace des pixels pilotes : un enchainement de
            partiels laisse les fantomes de la page precedente. On repasse par
@@ -1922,6 +2046,12 @@ static void show_ui(void)
     } else {
         epd->EPD_ShowPart(fb, FB_LEN);
         partiels++;
+    }
+    if (!epd->panne) {
+        memcpy(fb_dernier, fb, FB_LEN);
+        fb_valide = true;
+        dernier_envoi_ms = esp_timer_get_time() / 1000;
+        dernier_etat_voix = voix_etat;
     }
     xSemaphoreGive(epd_mux);
     if (pris) xSemaphoreGive(ui_mux);
@@ -2151,6 +2281,7 @@ static int ecoute_pcm(int ms_max, int *peak_out, int *seuil_out)
         int p = 0;
         int n = audio_record_at(done, step, &p);
         if (n <= 0) break;
+        voix_feed((const int16_t *)(rec_pcm + done * 2), n);
         done += n;
         if (bruit_n < 3) {                        /* 0,75 s pour mesurer le bruit de fond */
             bruit = bruit_n ? (p < bruit ? p : bruit) : p;
@@ -2184,7 +2315,7 @@ static void assistant_wake_task(void *arg)
     wake_busy = true;
     assist_abort = false;
     if (radio_etat != 0 && !parler_radio_ouverte) radio_stop();   /* on coupe la radio pour ecouter */
-    ui_page = PAGE_PARLER;
+    ui_page = PAGE_MAITRE;            /* on reste sur la page principale */
     voix_reponse[0] = 0;
     int tours = 0;
     for (tours = 0; tours < CONV_MAX_TOURS; tours++) {
@@ -2573,15 +2704,14 @@ static void pet_task(void *arg)
            l'e-paper met plusieurs secondes et n'aime pas etre rafraichi pour rien */
         if (ui_page == PAGE_MAITRE && !act_on && !wake_busy) {
             xSemaphoreTake(pet_mux, portMAX_DELAY);
-            int dx = (int)pet.x, dp = pet.pas;
             int dh = pet.humeur, de = pet.endormi;
             xSemaphoreGive(pet_mux);
             if (toast_txt[0] && (uint32_t)(esp_timer_get_time() / 1000) > toast_fin_ms) {
                 toast_txt[0] = 0;
                 show_ui();
             }
-            if (dx != vu_x || dp != vu_pas || dh != vu_humeur || de != vu_endormi) {
-                vu_x = dx; vu_pas = dp; vu_humeur = dh; vu_endormi = de;
+            if (dh != vu_humeur || de != vu_endormi) {
+                vu_humeur = dh; vu_endormi = de;
                 show_ui();
             }
         }
@@ -2611,6 +2741,8 @@ static void ui_task(void *arg)
             last_min = ti.tm_min;
             heure_sauve();          /* pour que le prochain demarrage soit a l'heure */
             ui_read_sensors();
+            kirby_promene();        /* il avance d'un pas par minute : une seule
+                                       image, donc un seul clignotement */
             show_ui();
         }
         /* la meteo : au demarrage puis toutes les 15 min */
@@ -3459,8 +3591,10 @@ static esp_err_t h_parle(httpd_req_t *req)
 
 static void voix_dit(const char *texte);   /* defini plus loin */
 
-/* /dit?t=texte : injecte un texte comme s'il venait du micro (test du cerveau
-   et de la voix sans parler). Ne touche ni au micro ni a la reconnaissance. */
+
+
+/* /ecran : l'ecran en ASCII, pour juger le dessin sans etre devant la carte.
+   ?q=bande -> la bande seule (chaque caractere = 2x2 pixels)                 */
 static esp_err_t h_dit(httpd_req_t *req)
 {
     char txt[300] = "";
@@ -3476,6 +3610,47 @@ static esp_err_t h_dit(httpd_req_t *req)
     cJSON_AddStringToObject(r, "err", esp_err_to_name(e));
     return send_json(req, r);
 }
+
+/* enregistre la cle a chaud : /cle?k=gsk_xxx (elle survit au redemarrage) */
+
+static esp_err_t h_ecran(httpd_req_t *req)
+{
+    char v[16] = "";
+    qval(req, "q", v, sizeof(v));
+    /* ?q=parle&b=0.8 : on force l'etat "elle parle" et l'ouverture de la bouche,
+       pour juger le dessin du visage sans lancer de voix */
+    if (!strcmp(v, "parle")) {
+        char vb[16] = "0.7";
+        qval(req, "b", vb, sizeof(vb));
+        int sauv_etat = voix_etat;
+        float sauv_b = voix_bouche;
+        voix_etat = 3;
+        voix_bouche = (float)atof(vb);
+        show_ui();
+        voix_etat = sauv_etat;
+        voix_bouche = sauv_b;
+    }
+    httpd_resp_set_type(req, "text/plain");
+    char ligne[112];
+    for (int y = 0; y <= 199; y += 2) {
+        int c = 0;
+        for (int x = 0; x < 200; x += 2) {
+            int noir = 0;
+            for (int dy = 0; dy < 2; dy++)
+                for (int dx = 0; dx < 2; dx++) {
+                    int yy = y + dy, xx = x + dx;
+                    int i = yy * 25 + (xx >> 3);
+                    if (!((fb[i] >> (7 - (xx & 7))) & 1)) noir++;
+                }
+            ligne[c++] = (noir >= 3) ? '#' : (noir == 2 ? '+' : (noir == 1 ? '.' : ' '));
+        }
+        ligne[c++] = '\n';
+        httpd_resp_send_chunk(req, ligne, c);
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 
 /* enregistre la cle a chaud : /cle?k=gsk_xxx (elle survit au redemarrage) */
 static esp_err_t h_cle(httpd_req_t *req)
@@ -3807,7 +3982,7 @@ static void mp3_sortie(MP3FrameInfo fi, int *sr, double *pos)
         *pos += pas;
     }
     *pos -= (double)frames;
-    if (o) hp_mono(pcm16, o);
+    if (o) { voix_feed(pcm16, o); hp_mono(pcm16, o); }
 }
 
 /* decode tout ce qui est lisible dans le tampon ; renvoie les octets consommes.
@@ -3928,69 +4103,146 @@ static void radio_wifi_task(void *arg)
 
 /* ---- la phrase -> la voix de Google (gratuit, sans cle) ---- */
 /* l'ancien nom, une requete = 190 caracteres */
-static void tts_parle_un(const char *texte);
 
-static void tts_parle(const char *texte)
-{
-    if (!texte || !*texte) return;
-    const char *p = texte;
-    while (*p) {
-        while (*p == ' ' || *p == '\n' || *p == '\r') p++;
-        if (!*p) break;
-        size_t n = strlen(p);
-        size_t k = (n < 180) ? n : 180;
-        if (k < n) {                       /* on coupe proprement : ponctuation, sinon espace */
-            size_t cut = 0;
-            for (size_t i = k; i > 40; i--) {
-                char c = p[i - 1];
-                if (c == '.' || c == '!' || c == '?' || c == ';' || c == ':') { cut = i; break; }
-            }
-            if (!cut)
-                for (size_t i = k; i > 40; i--)
-                    if (p[i - 1] == ' ') { cut = i; break; }
-            if (cut) k = cut;
-        }
-        char morceau[200];
-        snprintf(morceau, sizeof(morceau), "%.*s", (int)k, p);
-        tts_parle_un(morceau);
-        p += k;
-    }
-}
+/* ---- le TTS, en avance : pendant qu'un morceau se joue, le suivant se
+   telecharge. C'est ce qui fait toute la difference sur la latence percue. ---- */
 
-static void tts_parle_un(const char *texte)
+#define TTS_MORCEAU_MAX (160 * 1024)
+
+typedef struct {
+    char txt[210];
+    uint8_t *mp3;
+    int len;
+    volatile bool fini;
+} tts_lot;
+
+static int tts_mp3_fetch(const char *texte, uint8_t *mp3, int cap)
 {
-    if (!texte || !*texte) return;
-    if (radio_etat != 0) {           /* la radio se tait quand Mino parle */
-        radio_stop();
-        vTaskDelay(pdMS_TO_TICKS(120));
-    }
     char t[210];
     snprintf(t, sizeof(t), "%.190s", texte);
-    if (strlen(texte) > 190) {                 /* on coupe au dernier mot entier */
+    if (strlen(texte) > 190) {
         char *sp = strrchr(t, ' ');
         if (sp && sp > t + 40) *sp = 0;
     }
     char *enc = (char *)heap_caps_malloc(800, MALLOC_CAP_SPIRAM);
     char *url = (char *)heap_caps_malloc(1000, MALLOC_CAP_SPIRAM);
-    uint8_t *mp3 = (uint8_t *)heap_caps_malloc(160 * 1024, MALLOC_CAP_SPIRAM);
-    if (!enc || !url || !mp3) {
-        ESP_LOGW(TAG, "voix : plus de PSRAM pour le TTS");
-        if (enc) free(enc);
-        if (url) free(url);
-        if (mp3) free(mp3);
-        return;
-    }
+    if (!enc || !url) { if (enc) free(enc); if (url) free(url); return -1; }
     url_encode(t, enc, 800);
     snprintf(url, 1000, "%s%s&tl=%s", TTS_DEBUT, enc, langue);
     int64_t t0 = esp_timer_get_time();
-    int r = http_get(url, TTS_UA, mp3, 160 * 1024);
-    if (r > 0) {
+    int r = http_get(url, TTS_UA, mp3, cap);
+    if (r > 0)
         ESP_LOGI(TAG, "voix : %d octets mp3 en %.0f ms", r, (esp_timer_get_time() - t0) / 1000.0);
-        mp3_joue(mp3, r);
-    } else {
+    else
         ESP_LOGW(TAG, "voix : le TTS de Google a repondu %d", r);
+    free(enc); free(url);
+    return r;
+}
+
+static void tts_lot_tache(void *arg)
+{
+    tts_lot *L = (tts_lot *)arg;
+    L->len = tts_mp3_fetch(L->txt, L->mp3, TTS_MORCEAU_MAX);
+    L->fini = true;
+    vTaskDelete(NULL);
+}
+
+/* attend qu'un morceau soit pret, sans jamais bloquer indefiniment */
+static bool tts_attendre(tts_lot *L)
+{
+    int64_t t0 = esp_timer_get_time();
+    while (!L->fini) {
+        if ((esp_timer_get_time() - t0) > 15000000) {
+            ESP_LOGW(TAG, "voix : morceau perdu (15 s)");
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
-    free(enc); free(url); free(mp3);
+    return true;
+}
+
+static tts_lot *tts_lance(tts_lot *L)
+{
+    if (!L) return NULL;
+    L->fini = false; L->len = -1;
+    TaskHandle_t th = NULL;
+    if (xTaskCreateWithCaps(tts_lot_tache, "tts_lot", 12288, L, 5, &th,
+                            MALLOC_CAP_SPIRAM) != pdPASS) {
+        ESP_LOGW(TAG, "voix : tache de telechargement non creee, on le fait ici");
+        tts_lot_tache(L);          /* au pire, on telecharge sur place */
+    }
+    return L;
+}
+
+static void tts_parle(const char *texte)
+{
+    if (!texte || !*texte) return;
+    if (radio_etat != 0) { radio_stop(); vTaskDelay(pdMS_TO_TICKS(120)); }
+
+    tts_lot *lot = (tts_lot *)heap_caps_calloc(2, sizeof(tts_lot), MALLOC_CAP_SPIRAM);
+    if (!lot) { ESP_LOGW(TAG, "voix : plus de PSRAM pour le TTS"); return; }
+    bool ok = false;
+    for (int i = 0; i < 2; i++) {
+        lot[i].mp3 = (uint8_t *)heap_caps_malloc(TTS_MORCEAU_MAX, MALLOC_CAP_SPIRAM);
+        if (lot[i].mp3) ok = true;
+    }
+    if (!ok) {
+        ESP_LOGW(TAG, "voix : pas de tampon mp3");
+        free(lot);
+        return;
+    }
+
+    /* on decoupe : le premier morceau est court, pour que la voix demarre vite */
+    const char *p = texte;
+    int cur = 0;
+    tts_lot *prec = NULL;
+
+    while (*p) {
+        while (*p == ' ' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        size_t n = strlen(p);
+        size_t cible = prec ? 180 : 90;
+        size_t k = (n < cible) ? n : cible;
+        if (k < n) {
+            size_t cut = 0;
+            for (size_t i = k; i > 30; i--) {
+                char c = p[i - 1];
+                if (c == '.' || c == '!' || c == '?' || c == ';' || c == ':') { cut = i; break; }
+            }
+            if (!cut)
+                for (size_t i = k; i > 30; i--)
+                    if (p[i - 1] == ' ') { cut = i; break; }
+            if (cut) k = cut;
+        }
+        tts_lot *L = &lot[cur];
+        if (L->fini) { free(L->mp3); L->mp3 = NULL; }   /* deja joue */
+        if (!L->mp3) L->mp3 = (uint8_t *)heap_caps_malloc(TTS_MORCEAU_MAX, MALLOC_CAP_SPIRAM);
+        if (!L->mp3) break;
+        snprintf(L->txt, sizeof(L->txt), "%.*s", (int)k, p);
+        L->fini = false; L->len = -1;
+
+        if (!prec) {
+            /* premier morceau : on attend son mp3 (on n'a rien a jouer) */
+            tts_lot_tache(L);
+        } else {
+            /* on lance le telechargement du suivant AVANT de jouer celui-ci */
+            tts_lance(L);
+        }
+
+        /* on joue le morceau precedent, qui est pret */
+        if (prec) {
+            if (tts_attendre(prec) && prec->len > 0) mp3_joue(prec->mp3, prec->len);
+        }
+        prec = L;
+        cur = 1 - cur;
+        p += k;
+    }
+
+    if (prec) {
+        if (tts_attendre(prec) && prec->len > 0) mp3_joue(prec->mp3, prec->len);
+    }
+    for (int i = 0; i < 2; i++) if (lot[i].mp3) free(lot[i].mp3);
+    free(lot);
 }
 
 /* ---- l'assistant : texte entendu -> cerveau -> voix ---- */
@@ -5523,6 +5775,63 @@ static void mino_handle_line(const char *line)
     }
 }
 
+/* ---- banc d'essai ecran, pilote par la console USB : !<commande> ----------
+   !busy            niveau de la broche BUSY
+   !off | !on       rail d'alimentation de la dalle
+   !init            reinitialisation complete
+   !clear           init + effacement (chronometre)
+   !part [n]        n rafraichissements partiels de l'image courante
+   !full | !clean   rafraichissement complet (simple / avec LUT pleine)
+   !st              etat du driver                                                        */
+static void console_epd(const char *c)
+{
+    if (!epd) { ESP_LOGW(TAG, "banc : pas de dalle"); return; }
+    if (!strcmp(c, "busy") || !strcmp(c, "st")) {
+        ESP_LOGI(TAG, "banc : BUSY=%d panne=%d busy_ko=%d refus=%d",
+                 gpio_get_level(EPD_BUSY_PIN), (int)epd->panne, epd->busy_ko, refresh_count);
+        if (!strcmp(c, "busy")) return;
+    }
+    if (!strcmp(c, "off")) { gpio_set_level(EPD_PWR_PIN, 1); ESP_LOGI(TAG, "banc : rail coupe"); return; }
+    if (!strcmp(c, "on"))  { gpio_set_level(EPD_PWR_PIN, 0); ESP_LOGI(TAG, "banc : rail remis"); return; }
+
+    if (xSemaphoreTake(epd_mux, pdMS_TO_TICKS(20000)) != pdTRUE) {
+        ESP_LOGW(TAG, "banc : mutex occupe");
+        return;
+    }
+    int64_t t0 = esp_timer_get_time();
+    if (!strcmp(c, "init")) {
+        epd->EPD_Panne_Reset();
+        epd->EPD_Init();
+        ESP_LOGI(TAG, "banc : init -> panne=%d", (int)epd->panne);
+    } else if (!strcmp(c, "clear")) {
+        epd->EPD_Panne_Reset();
+        epd->EPD_Init();
+        epd->EPD_Clear();
+        epd->EPD_Display();
+        ESP_LOGI(TAG, "banc : clear -> panne=%d", (int)epd->panne);
+    } else if (!strncmp(c, "part", 4)) {
+        int n = atoi(c + 4);
+        if (n <= 0) n = 1;
+        for (int i = 0; i < n; i++) {
+            int64_t a = esp_timer_get_time();
+            epd->EPD_ShowPart(fb, FB_LEN);
+            ESP_LOGI(TAG, "banc : partiel %d/%d en %d ms (panne=%d)", i + 1, n,
+                     (int)((esp_timer_get_time() - a) / 1000), (int)epd->panne);
+            if (epd->panne) break;
+        }
+    } else if (!strcmp(c, "full")) {
+        epd->EPD_ShowFull(fb, FB_LEN);
+        ESP_LOGI(TAG, "banc : full -> panne=%d", (int)epd->panne);
+    } else if (!strcmp(c, "clean")) {
+        epd->EPD_ShowFullClean(fb, FB_LEN);
+        ESP_LOGI(TAG, "banc : clean -> panne=%d", (int)epd->panne);
+    } else {
+        ESP_LOGI(TAG, "banc : !busy !off !on !init !clear !part[n] !full !clean !st");
+    }
+    ESP_LOGI(TAG, "banc : %d ms au total", (int)((esp_timer_get_time() - t0) / 1000));
+    xSemaphoreGive(epd_mux);
+}
+
 static void serial_task(void *arg)
 {
     static char line[2048];
@@ -5597,7 +5906,8 @@ static void serial_task(void *arg)
                        mange le RX et fait perdre des octets */
                     if (!pcm_xfer && len < 400) ESP_LOGI(TAG, "> %s", line);
                     else if (!pcm_xfer) ESP_LOGI(TAG, "> %d octets recus", len);
-                    mino_handle_line(line);
+                    if (line[0] == '!') console_epd(line + 1);   /* banc d'essai ecran */
+                    else mino_handle_line(line);
                 }
                 len = 0;
                 continue;
@@ -5872,6 +6182,8 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "mic_bruit", (double)mic_bruit);
     cJSON_AddNumberToObject(r, "mic_seuil", (double)mic_seuil);
     cJSON_AddNumberToObject(r, "conso_mw", (double)conso_mw());
+    cJSON_AddNumberToObject(r, "epd_busy_ko", epd ? epd->busy_ko : -1);
+    cJSON_AddNumberToObject(r, "bouche", (double)voix_bouche);
     cJSON_AddNumberToObject(r, "compagnon_x", (double)kirby_x);
     cJSON_AddNumberToObject(r, "compagnon_y", (double)kirby_y);
     cJSON_AddNumberToObject(r, "stt_http", (double)stt_http);
@@ -5939,7 +6251,8 @@ static esp_err_t h_soul(httpd_req_t *req)
 static void api_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 28;
+    cfg.max_uri_handlers = 40;   /* 28 ne suffisait plus : les derniers URI
+                                    (/bande, /ecran) n'etaient pas enregistres */
     cfg.stack_size = 12288;   /* h_say fait du TLS : 8 Ko ne suffisaient pas */
     cfg.max_open_sockets = 2; /* 7 sockets par defaut = 7 piles de 16 Ko (112 Ko
                                  de RAM interne) ; on n'a jamais plus de 2 clients */
@@ -5978,6 +6291,7 @@ static void api_start(void)
     u.handler = h_bouton; u.uri = "/bouton"; httpd_register_uri_handler(srv, &u);
     u.handler = h_parle; u.uri = "/parle"; httpd_register_uri_handler(srv, &u);
     u.handler = h_dit;   u.uri = "/dit";   httpd_register_uri_handler(srv, &u);
+    u.handler = h_ecran; u.uri = "/ecran"; httpd_register_uri_handler(srv, &u);
     u.handler = h_fichier; u.uri = "/fichier"; httpd_register_uri_handler(srv, &u);
     u.method = HTTP_POST;
     u.handler = h_play; u.uri = "/play";  httpd_register_uri_handler(srv, &u);
@@ -6122,7 +6436,9 @@ extern "C" void app_main(void)
     xTaskCreate(button_task, "boutons", 3072, NULL, 3, NULL);
     xTaskCreate(ui_task, "ui", 8192, NULL, 3, NULL);   /* TLS pour la meteo */
     xTaskCreate(pet_task, "tamagotchi", 4096, NULL, 3, NULL);
-    xTaskCreate(promenade_task, "promenade", 3072, NULL, 2, NULL);
+    /* plus de tache "promenade" : elle redessinait la page toutes les 2 s, or
+       chaque image fait clignoter la dalle. Le compagnon bouge maintenant une
+       fois par minute, en meme temps que l'horloge (voir ui_task). */
 
     ESP_LOGI(TAG, "Mino est pret. Tape ton message ici (ou 'help').");
 

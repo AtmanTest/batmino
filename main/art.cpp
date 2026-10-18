@@ -1017,7 +1017,7 @@ void draw_bat_grand(int expression)
 /* il se dandine) : c'est ce qui le fait bouger d'un rafraichissement  */
 /* a l'autre.                                                          */
 /* ------------------------------------------------------------------ */
-void draw_kirby(int cx, int cy, int r, int ph, int etat)
+void draw_kirby(int cx, int cy, int r, int ph, int etat, float bouche)
 {
     if (r < 8) r = 8;
     int petit = (r < 22);        /* tout petit : on ne garde que le corps et la frimousse */
@@ -1036,7 +1036,12 @@ void draw_kirby(int cx, int cy, int r, int ph, int etat)
     a_ering(cx, cyb, r, r, 2, 1);                /* le corps, rond */
 
     /* les yeux : deux points pleins en petit, deux ovales avec reflet en grand */
-    if (etat == 3 || (ph % 10 == 9)) {
+    if (bouche >= 0) {
+        a_efill(cx - ex, ey, r / 7, r / 3, 1);
+        a_efill(cx + ex, ey, r / 7, r / 3, 1);
+        a_disc(cx - ex - r / 9, ey - r / 6, r / 11, 0);
+        a_disc(cx + ex - r / 9, ey - r / 6, r / 11, 0);
+    } else if (etat == 3 || (ph % 10 == 9)) {
         a_hline(cx - ex - r / 5, cx - ex + r / 5, ey, 2);      /* il ferme les yeux */
         a_hline(cx + ex - r / 5, cx + ex + r / 5, ey, 2);
     } else if (petit) {
@@ -1050,6 +1055,18 @@ void draw_kirby(int cx, int cy, int r, int ph, int etat)
     }
 
     /* la bouche : bien au-dessus du bas du corps, sinon elle se noie dedans */
+    if (bouche >= 0) {
+        int my = cyb + (petit ? r / 5 : r / 4);
+        int hb = 1 + (int)(bouche * (float)r * 0.30f);      /* l'ouverture suit l'energie */
+        int lb = r / 3;
+        if (bouche < 0.06f) {
+            a_hline(cx - lb, cx + lb, my, 2);
+        } else {
+            a_efill(cx, my, lb, hb, 1);
+            if (hb > 4) a_hline(cx - lb + 2, cx + lb - 2, my + hb / 2, 2);   /* la langue */
+        }
+        return;
+    }
     if (etat == 0)      a_arc(cx, cyb + (petit ? r / 5 : r / 4), r / 3, 205, 335, 2);
     else if (etat == 1) a_arc(cx, cyb + (petit ? r / 5 : r / 4), r / 3, 225, 315, 2);
     else if (etat == 3) {                                          /* il dort : une petite bouche ronde */
