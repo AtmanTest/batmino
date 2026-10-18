@@ -35,6 +35,8 @@
 #include "lwip/netif.h"
 #include "nvs_flash.h"
 #include "esp_spiffs.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "cJSON.h"
 #include "mp3dec.h"          /* decodeur mp3 (voix de Google) */
 
@@ -273,9 +275,18 @@ static float ui_temp_brut = 0.0f;
 static bool  ui_shtc_ok = false;
 static bool  ui_wifi_ok = false;
 static char  wifi_actif[33] = "";   /* borne sur laquelle on est connecte */
+
+/* prochaine reunion du calendrier (rempli par ms_boucle, vide si rien) */
+static char  ms_heure[6] = "";
+static char  ms_titre[64] = "";
+static int   ms_dans = -1;          /* minutes avant le debut, -1 = rien */
+static void ical_charge(void);
+static int http_get(const char *url, const char *ua, uint8_t *buf, int cap);
+static void ms_boucle(void);
 static bool  touch_log = false;
 static SemaphoreHandle_t i2c_mux = NULL;
 static void  ui_beep(void);
+static void  ui_chime(void);
 
 /* audio : tampon mono 16 bits en PSRAM et aides, utilisees des le reveil */
 static uint8_t *rec_pcm = NULL;
@@ -1173,6 +1184,13 @@ static void draw_app_maitre(void)
     a_text_c(100, 100, 2, meteo_texte(meteo_code));
     a_text_c(100, 116, 1, METEO_VILLE);
 
+    /* la prochaine reunion, si elle est proche */
+    if (ms_dans >= 0 && ms_dans <= 90 && ms_heure[0]) {
+        char ev[112];
+        snprintf(ev, sizeof(ev), "%s %s", ms_heure, ms_titre);
+        a_text_c(100, 176, 2, ev);
+    }
+
     /* le petit compagnon se promene dans la zone blanche (tache promenade) */
     draw_kirby(kirby_x, kirby_y, 15, anim_ph, kirby_etat());
 
@@ -1239,7 +1257,7 @@ static void draw_app_paroles(void)
 // voix_etat declare plus haut (ligne 208)
 static char voix_reponse[300] = "";
 static char voix_entendu_txt[300] = "";  /* dernier texte reconnu (lu par /state) */
-static volatile int assist_parle_ms = 8000;   /* duree d'ecoute (8 s par defaut) */
+static volatile int assist_parle_ms = 12000;  /* duree d'ecoute (12 s par defaut) */
 static volatile bool parler_radio_ouverte = false;  /* test : ne pas couper la radio en ecoutant */
 
 static void draw_micro(int cx, int cy, int h)
@@ -2725,16 +2743,20 @@ static int ecoute_pcm(int ms_max, int *peak_out, int *seuil_out)
             bruit = bruit_n ? (p < bruit ? p : bruit) : p;
             bruit_n++;
             if (bruit_n == 3) {
-                seuil = bruit * 3 + 300;
-                if (seuil < 350) seuil = 350;
-                if (seuil > 4000) seuil = 4000;
+                /* marge plus large qu'avant : un seuil trop bas coupait la
+                   phrase des la premiere respiration entre deux mots */
+                seuil = bruit * 3 + 600;
+                if (seuil < 700) seuil = 700;
+                if (seuil > 2500) seuil = 2500;
             }
             continue;
         }
         if (p > peak) peak = p;
         if (p > seuil) { parle = 1; silence = 0; if (soutenu < 100) soutenu++; }
         else if (parle) silence += 1;
-        if (parle && soutenu >= 2 && silence >= 3) break;
+        /* 5 tranches = 1,25 s de silence franc avant de conclure : on laisse
+           le temps de respirer au milieu d'une phrase */
+        if (parle && soutenu >= 2 && silence >= 5) break;
         act_pct = (done * 100) / total;
     }
     if (peak_out) *peak_out = peak;
@@ -2745,7 +2767,7 @@ static int ecoute_pcm(int ms_max, int *peak_out, int *seuil_out)
     return done * 2;
 }
 
-#define CONV_FENETRE_MS 10000   /* apres une reponse, le micro reste ouvert 10 s */
+#define CONV_FENETRE_MS 12000   /* apres une reponse, le micro reste ouvert 12 s */
 #define CONV_MAX_TOURS  10      /* garde-fou : 10 echanges d'affilee maximum */
 
 static void assistant_wake_task(void *arg)
@@ -2761,16 +2783,15 @@ static void assistant_wake_task(void *arg)
         voix_etat = 1;                         /* j'ecoute */
         if (tours == 0) {
             show_ui();
-            ui_beep();
-            ui_beep();
+            ui_chime();                    /* deux notes douces : "je t'ecoute" */
             vTaskDelay(pdMS_TO_TICKS(150));
         } else {
             /* la conversation continue : pas besoin de rappuyer sur le bouton */
             snprintf(voix_reponse, sizeof(voix_reponse), "JE T'ECOUTE (10 s)");
             show_ui();
-            ui_beep();
+            ui_chime();
         }
-        int ms = (tours == 0) ? (assist_parle_ms > 0 ? assist_parle_ms : 6000)
+        int ms = (tours == 0) ? (assist_parle_ms > 0 ? assist_parle_ms : 12000)
                               : CONV_FENETRE_MS;
         int peak = 0, seuil = 0;
         int bytes = ecoute_pcm(ms, &peak, &seuil);
@@ -3142,6 +3163,7 @@ static void ui_task(void *arg)
            (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
         wifi_secours();
         wifi_retour_principal();
+        ms_boucle();          /* calendrier : une passe par minute */
         if (ui_page == PAGE_SYS) sys_page_entre();
         else                     sys_page_sort();
         if (ui_page == PAGE_SYS) sys_echantillon();
@@ -4281,6 +4303,638 @@ static void voix_dit(const char *texte);   /* defini plus loin */
 
 /* /ecran : l'ecran en ASCII, pour juger le dessin sans etre devant la carte.
    ?q=bande -> la bande seule (chaque caractere = 2x2 pixels)                 */
+static bool http_ecrit(esp_http_client_handle_t c, const void *p, int n);
+
+/* ---------- CALENDRIER MICROSOFT (Graph) ----------
+   Le robot est autonome : le jeton de rafraichissement vit dans SPIFFS, il le
+   renouvelle lui-meme et interroge le calendrier toutes les 5 minutes. Le
+   jeton vient de tools/outlook_token.py, une seule fois (device code, sans
+   mot de passe stocke sur le robot). Aucun serveur intermediaire. */
+#define MS_CLIENT   "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+#define MS_RT_PATH  "/spiffs/msrt.txt"
+#define MS_RT_MAX   8192
+#define MS_REP_MAX  8192
+
+static char   *ms_rt = NULL;          /* refresh token (PSRAM) */
+static char   *ms_at = NULL;          /* access token (PSRAM) */
+static int64_t ms_at_exp = 0;         /* expiration, en microsecondes */
+static int64_t ms_prochain = 0;       /* prochaine interrogation */
+static bool    ms_annonce = false;    /* deja dit a voix haute */
+
+static bool ms_lit_rt(void)
+{
+    FILE *f = fopen(MS_RT_PATH, "r");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 40 || n >= MS_RT_MAX) { fclose(f); ESP_LOGW(TAG, "ms : jeton illisible (%ld o)", n); return false; }
+    if (!ms_rt) ms_rt = (char *)heap_caps_malloc(MS_RT_MAX, MALLOC_CAP_SPIRAM);
+    if (!ms_rt) { fclose(f); return false; }
+    size_t r = fread(ms_rt, 1, (size_t)n, f);
+    fclose(f);
+    ms_rt[r] = 0;
+    while (r && (ms_rt[r - 1] == '\n' || ms_rt[r - 1] == '\r')) ms_rt[--r] = 0;
+    return r >= 40;
+}
+
+static void ms_ecrit_rt(const char *t)
+{
+    if (!t || !t[0]) return;
+    if (!ms_rt) ms_rt = (char *)heap_caps_malloc(MS_RT_MAX, MALLOC_CAP_SPIRAM);
+    if (ms_rt) snprintf(ms_rt, MS_RT_MAX, "%s", t);
+    FILE *f = fopen(MS_RT_PATH, "w");
+    if (!f) { ESP_LOGW(TAG, "ms : jeton non enregistre (SPIFFS)"); return; }
+    fputs(t, f);
+    fclose(f);
+}
+
+/* POST application/x-www-form-urlencoded, reponse lue en entier */
+static int ms_post(const char *url, const char *corps, char *rep, size_t repsz,
+                   const char *entete, const char *entete_val)
+{
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.method = HTTP_METHOD_POST;
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.timeout_ms = 20000;
+    cfg.buffer_size = 1024;
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return -1;
+    if (entete) esp_http_client_set_header(c, entete, entete_val);
+    int len = (int)strlen(corps);
+    int status = -1;
+    if (esp_http_client_open(c, len) == ESP_OK) {
+        if (http_ecrit(c, corps, len)) {
+            esp_http_client_fetch_headers(c);
+            status = esp_http_client_get_status_code(c);
+            int n = 0, r;
+            while (n < (int)repsz - 1 &&
+                   (r = esp_http_client_read(c, rep + n, repsz - 1 - n)) > 0)
+                n += r;
+            rep[n] = 0;
+            net_tx_octets += (uint32_t)len;
+            net_rx_octets += (uint32_t)n;
+        }
+    }
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return status;
+}
+
+/* Renouvelle le jeton d'acces. Microsoft renvoie AUSSI un nouveau refresh
+   token : il faut l'enregistrer, l'ancien est invalide. */
+static bool ms_rafraichit(void)
+{
+    if (!ms_rt || !ms_rt[0]) return false;
+    char *corps = (char *)heap_caps_malloc(MS_RT_MAX + 512, MALLOC_CAP_SPIRAM);
+    char *rep = (char *)heap_caps_malloc(MS_REP_MAX, MALLOC_CAP_SPIRAM);
+    if (!corps || !rep) { free(corps); free(rep); return false; }
+    snprintf(corps, MS_RT_MAX + 512,
+             "grant_type=refresh_token&client_id=" MS_CLIENT
+             "&scope=offline_access%%20Calendars.Read&refresh_token=%s", ms_rt);
+    int st = ms_post("https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                     corps, rep, MS_REP_MAX,
+                     "Content-Type", "application/x-www-form-urlencoded");
+    free(corps);
+    bool ok = false;
+    cJSON *j = (st == 200) ? cJSON_Parse(rep) : NULL;
+    if (j) {
+        cJSON *at = cJSON_GetObjectItem(j, "access_token");
+        cJSON *rt = cJSON_GetObjectItem(j, "refresh_token");
+        cJSON *ex = cJSON_GetObjectItem(j, "expires_in");
+        if (cJSON_IsString(at)) {
+            if (!ms_at) ms_at = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+            if (ms_at && snprintf(ms_at, 4096, "%s", at->valuestring) > 0) ok = true;
+            ms_at_exp = esp_timer_get_time() + (int64_t)(cJSON_IsNumber(ex) ? ex->valueint : 3600) * 1000000LL;
+            if (cJSON_IsString(rt)) {
+                if (strcmp(rt->valuestring, ms_rt) != 0) {
+                    ms_ecrit_rt(rt->valuestring);
+                    ESP_LOGI(TAG, "ms : nouveau jeton de rafraichissement enregistre");
+                }
+            }
+        } else {
+            ESP_LOGW(TAG, "ms : renouvellement refuse : %s",
+                     cJSON_IsString(cJSON_GetObjectItem(j, "error")) ?
+                     cJSON_GetObjectItem(j, "error")->valuestring : "?");
+        }
+        cJSON_Delete(j);
+    } else {
+        ESP_LOGW(TAG, "ms : renouvellement KO (HTTP %d) %.120s", st, rep);
+    }
+    free(rep);
+    return ok;
+}
+
+static long ms_epoch(const char *iso)   /* "2026-10-18T14:30:00.0000000" */
+{
+    int Y, M, D, h, m, s = 0;
+    if (sscanf(iso, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &s) < 5) return 0;
+    struct tm t = {};
+    t.tm_year = Y - 1900; t.tm_mon = M - 1; t.tm_mday = D;
+    t.tm_hour = h; t.tm_min = m; t.tm_sec = s; t.tm_isdst = -1;
+    return (long)mktime(&t);
+}
+
+static void ms_interroge(void)
+{
+    time_t now = time(NULL);
+    struct tm t0, t1;
+    localtime_r(&now, &t0);
+    time_t dans12h = now + 12 * 3600;
+    localtime_r(&dans12h, &t1);
+    char url[512];
+    snprintf(url, sizeof(url),
+             "https://graph.microsoft.com/v1.0/me/calendarView?startDateTime="
+             "%04d-%02d-%02dT%02d:%02d:00&endDateTime=%04d-%02d-%02dT%02d:%02d:00"
+             "&$select=subject,start&$top=4&$orderby=start/dateTime",
+             t0.tm_year + 1900, t0.tm_mon + 1, t0.tm_mday, t0.tm_hour, t0.tm_min,
+             t1.tm_year + 1900, t1.tm_mon + 1, t1.tm_mday, t1.tm_hour, t1.tm_min);
+    char *rep = (char *)heap_caps_malloc(MS_REP_MAX, MALLOC_CAP_SPIRAM);
+    if (!rep) return;
+    char auth[2048];
+    snprintf(auth, sizeof(auth), "Bearer %s", ms_at ? ms_at : "");
+    int st = ms_post(url, "", rep, MS_REP_MAX, "Authorization", auth);
+    if (st != 200) {
+        ESP_LOGW(TAG, "ms : calendrier HTTP %d %.120s", st, rep);
+        free(rep);
+        return;
+    }
+    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0;
+    cJSON *j = cJSON_Parse(rep);
+    cJSON *v = j ? cJSON_GetObjectItem(j, "value") : NULL;
+    int n = cJSON_IsArray(v) ? cJSON_GetArraySize(v) : 0;
+    for (int i = 0; i < n; i++) {
+        cJSON *ev = cJSON_GetArrayItem(v, i);
+        cJSON *suj = cJSON_GetObjectItem(ev, "subject");
+        cJSON *deb = cJSON_GetObjectItem(ev, "start");
+        cJSON *dt = deb ? cJSON_GetObjectItem(deb, "dateTime") : NULL;
+        if (!cJSON_IsString(dt)) continue;
+        long t = ms_epoch(dt->valuestring);
+        if (t == 0) continue;
+        long delta = (long)now - t;              /* negatif = a venir */
+        if (delta > 0) continue;                 /* deja commence : on passe */
+        struct tm e; time_t tt = (time_t)t; localtime_r(&tt, &e);
+        snprintf(ms_heure, sizeof(ms_heure), "%02d:%02d", e.tm_hour, e.tm_min);
+        snprintf(ms_titre, sizeof(ms_titre), "%s", cJSON_IsString(suj) ? suj->valuestring : "reunion");
+        ms_dans = (int)((-delta) / 60);
+        break;
+    }
+    if (j) cJSON_Delete(j);
+    free(rep);
+    ESP_LOGI(TAG, "ms : %d rendez-vous, prochain '%s' a %s dans %d min",
+             n, ms_titre, ms_heure, ms_dans);
+}
+
+/* ---------- CALENDRIER PUBLIE (.ics) ----------
+   Microsoft refuse le consentement aux applications tierces sur ce compte
+   (client "Azure CLI" = application first party). La sortie propre, sans
+   jeton ni consentement : Outlook publie le calendrier en lecture seule sur
+   une adresse .ics. On la telecharge, on lit les VEVENT et on garde le
+   prochain rendez-vous. Reglable par /ical?u=<lien> (enregistre en NVS). */
+static char ical_url[300] = "";
+static int  ical_octets = 0;              /* taille de la derniere reponse */
+static int  ical_evenements = 0;          /* VEVENT vus dans la reponse */
+static int  ical_dernier = 0;             /* dernier code de http_get */
+static char ical_debut_reponse[48] = "";  /* debut brut, pour diagnostiquer */
+
+static long jours_depuis_1970(int y, int m, int d)
+{
+    y -= (m <= 2);
+    long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (long)doe - 719468;
+}
+
+/* decalage entre l'heure locale et UTC, en secondes (Paris : 7200 en ete).
+   Calcule a partir des champs locaux : mktime n'est pas fiable ici, il
+   reinterprete selon le fuseau et se trompe d'une heure au changement. */
+static long decalage_local(void)
+{
+    time_t now = time(NULL);
+    struct tm l;
+    localtime_r(&now, &l);
+    long jours = jours_depuis_1970(l.tm_year + 1900, l.tm_mon + 1, l.tm_mday);
+    long meme_heure_en_utc = jours * 86400L + l.tm_hour * 3600L + l.tm_min * 60L + l.tm_sec;
+    return meme_heure_en_utc - (long)now;
+}
+
+/* "20261018T143000" (heure locale), "20261018T123000Z" (UTC), "20261018" */
+static long ical_epoch_tz(const char *v, bool utc)
+{
+    int Y, M, D, h = 0, mi = 0, s = 0;
+    if (sscanf(v, "%4d%2d%2dT%2d%2d%2d", &Y, &M, &D, &h, &mi, &s) >= 3) {
+        if (M < 1 || M > 12 || D < 1 || D > 31) return 0;
+        long j = jours_depuis_1970(Y, M, D);
+        long e = j * 86400L + h * 3600L + mi * 60L + s;   /* champs lus comme UTC */
+        /* TZID=UTC/GMT : l'heure est deja en UTC ; sinon (Romance Standard
+           Time = Paris) c'est de l'heure locale */
+        if (!utc && !strchr(v, 'Z')) e -= decalage_local();
+        return e;
+    }
+    return 0;
+}
+
+static long ical_epoch(const char *v) { return ical_epoch_tz(v, false); }
+
+/* premiere occurrence a venir d'un evenement, boucle simple DAILY/WEEKLY */
+static long ical_occurrence(long debut, const char *rrule, long now)
+{
+    if (debut <= 0) return 0;
+    if (!rrule || !*rrule) return debut >= now ? debut : 0;
+    int daily = strstr(rrule, "FREQ=DAILY") != NULL;
+    int weekly = strstr(rrule, "FREQ=WEEKLY") != NULL;
+    if (!daily && !weekly) return debut >= now ? debut : 0;
+    int intervalle = 1;
+    const char *p = strstr(rrule, "INTERVAL=");
+    if (p) { intervalle = atoi(p + 9); if (intervalle < 1) intervalle = 1; }
+    long until = 0;
+    p = strstr(rrule, "UNTIL=");
+    if (p) until = ical_epoch(p + 6);
+    int compte = -1;
+    p = strstr(rrule, "COUNT=");
+    if (p) compte = atoi(p + 6);
+    long pas = (daily ? 86400L : 604800L) * intervalle;
+    long t = debut;
+    for (int i = 0; i < 700 && t < now + 30 * 86400L; i++) {
+        if (t >= now) {
+            if (until && t > until) return 0;
+            return t;
+        }
+        t += pas;
+        if (until && t > until) return 0;
+        if (compte > 0 && i + 1 >= compte) return 0;
+    }
+    return 0;
+}
+
+static void ical_nettoie(char *s)      /* \\, \\n, \\; et fins de ligne */
+{
+    char *d = s;
+    for (char *p = s; *p; p++) {
+        if (*p == '\\' && p[1]) {
+            p++;
+            *d++ = (*p == 'n' || *p == 'N') ? ' ' : *p;
+        } else if (*p == '\r' || *p == '\n') {
+            continue;
+        } else {
+            *d++ = *p;
+        }
+    }
+    *d = 0;
+    while (d > s && (d[-1] == ' ' || d[-1] == '\t')) *--d = 0;
+}
+
+static void ical_interroge(void)
+{
+    const int cap = 96 * 1024;
+    ical_octets = 0;
+    ical_evenements = 0;
+    ical_debut_reponse[0] = 0;
+    char *buf = (char *)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!buf) return;
+    int r = http_get(ical_url, "Mino/1.0", (uint8_t *)buf, cap - 1);
+    ical_dernier = r;
+    if (r <= 0) {
+        ESP_LOGW(TAG, "ical : telechargement KO (%d)", r);
+        free(buf);
+        return;
+    }
+    buf[r] = 0;
+    ical_octets = r;
+    snprintf(ical_debut_reponse, sizeof(ical_debut_reponse), "%.40s", buf);
+    for (const char *q = buf; (q = strstr(q, "BEGIN:VEVENT")) != NULL; q += 12)
+        ical_evenements++;
+    if (!strstr(buf, "BEGIN:VCALENDAR")) {
+        ESP_LOGW(TAG, "ical : reponse inattendue %.80s", buf);
+        free(buf);
+        return;
+    }
+    long now = (long)time(NULL);
+    long meilleur = 0;
+    char meilleur_titre[64] = "";
+
+    /* lignes repliees : une continuation commence par espace ou tabulation */
+    char ligne[512];
+    int  ll = 0;
+    bool dans = false;
+    long debut = 0;
+    char titre[128] = "";
+    char rrule[192] = "";
+    const char *p = buf;
+    while (*p) {
+        const char *fin = strchr(p, '\n');
+        int n = fin ? (int)(fin - p) : (int)strlen(p);
+        if (n > 0 && (p[0] == ' ' || p[0] == '\t')) {
+            if (ll + n - 1 < (int)sizeof(ligne) - 1) {      /* repli : on colle */
+                memcpy(ligne + ll, p + 1, (size_t)n - 1);
+                ll += n - 1;
+                ligne[ll] = 0;
+            }
+        } else {
+            /* ligne complete : on la traite */
+            if (ll > 0) {
+                if (!strncmp(ligne, "BEGIN:VEVENT", 12)) {
+                    dans = true; debut = 0; titre[0] = 0; rrule[0] = 0;
+                } else if (!strncmp(ligne, "END:VEVENT", 10) && dans) {
+                    long occ = ical_occurrence(debut, rrule, now);
+                    if (occ > 0 && (meilleur == 0 || occ < meilleur)) {
+                        meilleur = occ;
+                        snprintf(meilleur_titre, sizeof(meilleur_titre), "%s",
+                                 titre[0] ? titre : "reunion");
+                    }
+                    dans = false;
+                } else if (dans && !strncmp(ligne, "DTSTART", 7)) {
+                    char *c = strchr(ligne, ':');
+                    if (c) {
+                        bool utc = strstr(ligne, "TZID=UTC") || strstr(ligne, "TZID=GMT");
+                        debut = ical_epoch_tz(c + 1, utc);
+                    }
+                } else if (dans && !strncmp(ligne, "SUMMARY", 7)) {
+                    char *c = strchr(ligne, ':');
+                    if (c) { snprintf(titre, sizeof(titre), "%s", c + 1); ical_nettoie(titre); }
+                } else if (dans && !strncmp(ligne, "RRULE", 5)) {
+                    char *c = strchr(ligne, ':');
+                    if (c) snprintf(rrule, sizeof(rrule), "%s", c + 1);
+                }
+            }
+            n = 0;
+            while (p[n] && p[n] != '\n' && p[n] != '\r' && n < (int)sizeof(ligne) - 1) {
+                ligne[n] = p[n];
+                n++;
+            }
+            ligne[n] = 0;
+            ll = n;
+        }
+        p = fin ? fin + 1 : p + strlen(p);
+    }
+    free(buf);
+
+    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0;
+    if (meilleur > 0) {
+        struct tm e;
+        time_t tt = (time_t)meilleur;
+        localtime_r(&tt, &e);
+        snprintf(ms_heure, sizeof(ms_heure), "%02d:%02d", e.tm_hour, e.tm_min);
+        snprintf(ms_titre, sizeof(ms_titre), "%s", meilleur_titre);
+        ms_dans = (int)((meilleur - now) / 60);
+        if (ms_dans < 0) ms_dans = 0;
+    }
+    ESP_LOGI(TAG, "ical : prochain '%s' a %s dans %d min", ms_titre, ms_heure, ms_dans);
+}
+
+static int http_get(const char *url, const char *ua, uint8_t *buf, int cap);
+
+static void ical_charge(void)
+{
+    nvs_handle_t nh;
+    size_t l = sizeof(ical_url);
+    ical_url[0] = 0;
+    if (nvs_open("mino", NVS_READONLY, &nh) == ESP_OK) {
+        if (nvs_get_str(nh, "ical", ical_url, &l) != ESP_OK) ical_url[0] = 0;
+        nvs_close(nh);
+    }
+}
+
+static volatile bool ical_demande = false;   /* /ical?u= : lire tout de suite */
+static volatile bool cal_occupe = false;     /* une lecture est en cours */
+static TaskHandle_t  cal_tache_h = NULL;
+
+/* La lecture du calendrier se fait dans SA tache : dans le gestionnaire HTTP
+   elle bloquait le serveur (et l'ecran) pendant 20 s, et la pile httpd de
+   12 Ko ne suffit pas au TLS. Pile en PSRAM, il ne reste presque plus de
+   RAM interne. */
+static void cal_travail(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        cal_occupe = true;
+        if (ical_url[0]) {
+            ical_interroge();
+        } else if (ms_rt && ms_rt[0]) {
+            int64_t now = esp_timer_get_time();
+            if (!ms_at || now > ms_at_exp - 120LL * 1000000) {
+                if (ms_rafraichit()) ms_interroge();
+            } else {
+                ms_interroge();
+            }
+        }
+        cal_occupe = false;
+    }
+}
+
+static void cal_demarre(void)
+{
+    if (cal_tache_h) return;
+    if (xTaskCreateWithCaps(cal_travail, "cal", 16384, NULL, 2, &cal_tache_h,
+                            MALLOC_CAP_SPIRAM) != pdPASS) {
+        cal_tache_h = NULL;
+        ESP_LOGW(TAG, "cal : tache non creee (memoire)");
+    }
+}
+
+static void ms_boucle(void)
+{
+    static int64_t dernier = 0;
+    static bool init = false;
+    if (!init) {
+        init = true;
+        ical_charge();
+        if (ical_url[0]) {
+            ESP_LOGI(TAG, "ical : calendrier publie configure");
+        } else if (!ms_lit_rt()) {
+            ESP_LOGI(TAG, "ms : pas de jeton calendrier");
+            return;
+        } else {
+            ESP_LOGI(TAG, "ms : jeton calendrier present (%d o)", (int)strlen(ms_rt));
+        }
+        cal_demarre();
+    }
+    if (!ical_url[0] && (!ms_rt || !ms_rt[0])) return;
+    if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) return;
+    int64_t now = esp_timer_get_time();
+    if (ical_demande) {                     /* demande explicite : sans attendre */
+        ical_demande = false;
+        ms_prochain = 0;
+        dernier = now;
+    } else {
+        if (dernier && now - dernier < 60LL * 1000000) return;   /* une passe par minute */
+        dernier = now;
+    }
+    if (ms_prochain && now < ms_prochain) return;
+    ms_prochain = now + 300LL * 1000000;                     /* toutes les 5 min */
+    if (cal_tache_h && !cal_occupe) xTaskNotifyGive(cal_tache_h);
+    /* l'annonce : une fois, quand il reste moins d'un quart d'heure */
+    if (ms_dans >= 0 && ms_dans <= 15 && !ms_annonce) {
+        ms_annonce = true;
+        char phrase[128];
+        snprintf(phrase, sizeof(phrase), "Dans %d minutes, %s.", ms_dans, ms_titre);
+        voix_dit(phrase);
+    }
+    /* on rearme des que le rendez-vous sort de la fenetre, sinon l'annonce
+       reste bloquee apres la premiere reunion (ms_dans vaut -1) */
+    if (ms_dans < 0 || ms_dans > 15) ms_annonce = false;
+}
+
+/* Enregistre un jeton de rafraichissement Microsoft (POST, corps = jeton).
+   Le jeton fait ~1,5 Ko : trop long pour une query string. */
+static esp_err_t h_caltoken(httpd_req_t *req)
+{
+    char *buf = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"memoire\"}"); return ESP_OK; }
+    int n = httpd_req_recv(req, buf, 4095);
+    if (n <= 0) { free(buf); httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"corps vide\"}"); return ESP_OK; }
+    buf[n] = 0;
+    char *s = buf;
+    while (*s == ' ' || *s == '\n' || *s == '\r') s++;
+    size_t l = strlen(s);
+    while (l && (s[l-1] == '\n' || s[l-1] == '\r' || s[l-1] == ' ')) s[--l] = 0;
+    bool ok = (l >= 40);
+    if (ok) {
+        ms_ecrit_rt(s);
+        ms_at = NULL; ms_at_exp = 0; ms_prochain = 0; ms_annonce = false;
+        ESP_LOGI(TAG, "ms : jeton installe par HTTP (%d o)", (int)l);
+    }
+    char rep[96];
+    snprintf(rep, sizeof(rep), "{\"ok\":%s,\"longueur\":%d}", ok ? "true" : "false", (int)l);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, rep);
+    free(buf);
+    return ESP_OK;
+}
+
+/* /ical?u=<lien .ics> : enregistre le calendrier publie et l'interroge tout
+   de suite.   /ical?off=1 : l'oublie.   /ical : etat. */
+static esp_err_t h_ical(httpd_req_t *req)
+{
+    char v[400] = "";
+    if (qval(req, "off", v, sizeof(v)) == ESP_OK && v[0] == '1') {
+        ical_url[0] = 0;
+        nvs_handle_t nh;
+        if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_erase_key(nh, "ical");
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
+        ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0;
+        httpd_resp_sendstr(req, "{\"ok\":true,\"configure\":false}");
+        return ESP_OK;
+    }
+    if (qval(req, "u", v, sizeof(v)) == ESP_OK && v[0]) {
+        snprintf(ical_url, sizeof(ical_url), "%s", v);
+        nvs_handle_t nh;
+        if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_set_str(nh, "ical", ical_url);
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
+        ms_prochain = 0;
+        ms_annonce = false;
+        ical_demande = true;                 /* la tache cal lit tout de suite */
+        if (cal_tache_h) xTaskNotifyGive(cal_tache_h);
+        char rep[400];
+        snprintf(rep, sizeof(rep),
+                 "{\"ok\":true,\"enregistre\":true,\"titre\":\"%s\",\"heure\":\"%s\",\"dans\":%d}",
+                 ms_titre, ms_heure, ms_dans);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, rep);
+        ESP_LOGI(TAG, "ical : lien enregistre (%d o)", (int)strlen(ical_url));
+        return ESP_OK;
+    }
+    char rep[640];
+    char debut[48];
+    int k = 0;
+    for (const char *p = ical_debut_reponse; *p && k < 40; p++)
+        debut[k++] = (*p == '\r' || *p == '\n' || *p == '"') ? '.' : *p;
+    debut[k] = 0;
+    snprintf(rep, sizeof(rep),
+             "{\"configure\":%s,\"url\":\"%.280s\",\"octets\":%d,\"vevent\":%d,"
+             "\"dernier\":%d,\"tache\":%s,\"occupe\":%s,\"debut\":\"%s\"}",
+             ical_url[0] ? "true" : "false", ical_url, ical_octets, ical_evenements,
+             ical_dernier, cal_tache_h ? "true" : "false", cal_occupe ? "true" : "false",
+             debut);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, rep);
+    return ESP_OK;
+}
+
+/* ---------- MISE A JOUR PAR WIFI ----------
+   POST /maj avec le binaire mino.bin brut dans le corps (pas de multipart).
+   L'image s'ecrit dans l'autre emplacement OTA : si elle est valide la carte
+   redemarre dessus, sinon l'ancienne reste en place et redemarre toute seule.
+   C'est ce qui permet de mettre a jour sans brancher le cable USB. */
+static esp_err_t h_maj(httpd_req_t *req)
+{
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"aucun emplacement ota\"}");
+        return ESP_OK;
+    }
+    if (req->content_len <= 20000) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"corps trop petit\"}");
+        return ESP_OK;
+    }
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"memoire\"}");
+        return ESP_OK;
+    }
+    esp_ota_handle_t ota = 0;
+    esp_err_t e = esp_ota_begin(part, OTA_SIZE_UNKNOWN, &ota);
+    if (e != ESP_OK) {
+        free(buf);
+        ESP_LOGW(TAG, "maj : begin KO (%s)", esp_err_to_name(e));
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"begin\"}");
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "maj : %d octets vers %s", (int)req->content_len, part->label);
+    int reste = (int)req->content_len, ecrits = 0;
+    while (reste > 0) {
+        int n = httpd_req_recv(req, (char *)buf, reste > 8192 ? 8192 : reste);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) {
+            esp_ota_abort(ota);
+            free(buf);
+            httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"lecture\"}");
+            return ESP_OK;
+        }
+        e = esp_ota_write(ota, buf, (size_t)n);
+        if (e != ESP_OK) {
+            esp_ota_abort(ota);
+            free(buf);
+            ESP_LOGW(TAG, "maj : ecriture KO (%s) a %d", esp_err_to_name(e), ecrits);
+            httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"ecriture\"}");
+            return ESP_OK;
+        }
+        ecrits += n;
+        reste -= n;
+    }
+    free(buf);
+    e = esp_ota_end(ota);
+    if (e != ESP_OK) {
+        char r[120];
+        snprintf(r, sizeof(r), "{\"ok\":false,\"err\":\"image invalide (%s)\"}", esp_err_to_name(e));
+        httpd_resp_sendstr(req, r);
+        return ESP_OK;
+    }
+    e = esp_ota_set_boot_partition(part);
+    if (e != ESP_OK) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"demarrage\"}");
+        return ESP_OK;
+    }
+    char rep[128];
+    snprintf(rep, sizeof(rep), "{\"ok\":true,\"octets\":%d,\"emplacement\":\"%s\",\"redemarrage\":1}",
+             ecrits, part->label);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, rep);
+    ESP_LOGW(TAG, "maj : image acceptee (%d octets), redemarrage", ecrits);
+    vTaskDelay(pdMS_TO_TICKS(900));
+    esp_restart();
+    return ESP_OK;
+}
+
 static esp_err_t h_dit(httpd_req_t *req)
 {
     char txt[300] = "";
@@ -4552,17 +5206,44 @@ static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
         cfg.max_redirection_count = 4;   /* FG Radio et autres : suivre les 302 */
     cfg.url = url;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    cfg.timeout_ms = 15000;
-    cfg.buffer_size = 2048;
+    cfg.timeout_ms = 20000;
+    cfg.buffer_size = 4096;
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (!c) return -1;
     if (ua) esp_http_client_set_header(c, "User-Agent", ua);
     int res = -1;
     if (esp_http_client_open(c, 0) == ESP_OK) {
-        esp_http_client_fetch_headers(c);
+        int64_t annonce = esp_http_client_fetch_headers(c);
         int status = esp_http_client_get_status_code(c);
-        int o = 0, r;
-        while (o < cap && (r = esp_http_client_read(c, (char *)buf + o, cap - o)) > 0) o += r;
+        int o = 0, r, creux = 0;
+        int64_t limite = esp_timer_get_time() + 30LL * 1000000;   /* 30 s max, quoi qu'il arrive */
+        /* Un read() qui renvoie 0 au milieu du flux (Outlook met parfois une
+           seconde a fabriquer la fin d'un gros .ics) coupait le telechargement
+           a ~2 Ko. On ne conclut plus au premier trou : on attend que le client
+           dise lui-meme "tout recu" (is_complete_data_received), avec une
+           patience de 8 s, et seulement alors on s'arrete. */
+        while (o < cap) {
+            r = esp_http_client_read(c, (char *)buf + o, cap - o);
+            if (r > 0) {
+                o += r;
+                creux = 0;
+                continue;
+            }
+            /* r < 0 n'est pas forcement une panne : esp-tls remonte
+               MBEDTLS_ERR_SSL_WANT_READ (-0x7100) en ESP_FAIL quand la
+               socket non bloquante n'a pas encore de donnees. On reessaie
+               au lieu de couper le telechargement (c'etait la cause du .ics
+               tronque a ~2 Ko). */
+            if (esp_http_client_is_complete_data_received(c)) break;
+            if (annonce > 0 && o >= (int)annonce) break;
+            if (esp_timer_get_time() > limite) { ESP_LOGW(TAG, "http : delai depasse a %d o", o); break; }
+            if (++creux > 400) break;              /* 400 x 20 ms = 8 s */
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (annonce > 0 && o < (int)annonce)
+            ESP_LOGW(TAG, "http : reponse incomplete %d/%d o", o, (int)annonce);
+        if (annonce > cap)
+            ESP_LOGW(TAG, "http : tampon trop petit (%d o annonces, %d dispo)", (int)annonce, cap);
         res = (status == 200) ? o : -status;
         if (res > 0) net_rx_octets += (uint32_t)res;
     }
@@ -5809,15 +6490,20 @@ static esp_err_t h_fichier(httpd_req_t *req)
         }
         FILE *f = fopen(chemin, "wb");
         if (!f) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "ouverture");
-        static char buf[32768];              /* gros blocs : la SD aime */
+        /* 32 Ko en PSRAM et non en .bss : ces deux tampons prenaient 64 Ko de
+           RAM interne, et le wifi n'avait plus de quoi allouer ses tampons de
+           reception ("wifi:mem fail"), ce qui coupait les telechargements. */
+        char *buf = (char *)heap_caps_malloc(32768, MALLOC_CAP_SPIRAM);
+        if (!buf) { fclose(f); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "memoire"); }
         long total = 0;
         while (1) {
-            int got = httpd_req_recv(req, buf, sizeof(buf));
+            int got = httpd_req_recv(req, buf, 32768);
             if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
             if (got <= 0) break;
             fwrite(buf, 1, got, f);
             total += got;
         }
+        free(buf);
         fflush(f);
         fsync(fileno(f));
         fclose(f);
@@ -5831,10 +6517,12 @@ static esp_err_t h_fichier(httpd_req_t *req)
     FILE *f = fopen(chemin, "rb");
     if (!f) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "absent");
     httpd_resp_set_type(req, "application/octet-stream");
-    static char buf[32768];
+    char *buf = (char *)heap_caps_malloc(32768, MALLOC_CAP_SPIRAM);
+    if (!buf) { fclose(f); return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "memoire"); }
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+    while ((n = fread(buf, 1, 32768, f)) > 0)
         if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+    free(buf);
     fclose(f);
     return httpd_resp_send_chunk(req, NULL, 0);
 }
@@ -5928,17 +6616,45 @@ static int audio_sd_write(const char *path, const uint8_t *mono, int data_len)
     return (int)w;
 }
 
-static void ui_beep(void)
+/* un bip doux : attaque et extinction progressives (sinon le haut-parleur
+   claque) et un niveau bien plus bas que l'ancien 0,30 a 660 Hz, qui
+   agressait l'oreille. Le volume de lecture est a 90 dans audio_play_mono,
+   donc c'est l'amplitude ici qui regle la douceur. */
+static void bip_doux(float hz, int ms, float amp)
 {
     if (!rec_pcm) return;
-    int n = 16000 / 4;
+    const int sr = 16000;
+    int n = sr * ms / 1000;
     if (n > AUDIO_MAX_FRAMES) n = AUDIO_MAX_FRAMES;
+    int att = sr * 10 / 1000;          /* 10 ms d'attaque */
+    int rel = sr * 60 / 1000;          /* 60 ms d'extinction */
+    if (att < 1) att = 1;
+    if (rel > n / 2) rel = n / 2;
+    if (rel < 1) rel = 1;
     for (int i = 0; i < n; i++) {
-        int16_t v = (int16_t)lroundf(0.30f * 32767.0f * sinf(2.0f * 3.14159265f * 660.0f * (float)i / 16000.0f));
+        float env = 1.0f;
+        if (i < att) env = (float)i / (float)att;
+        else if (i > n - rel) env = (float)(n - i) / (float)rel;
+        int16_t v = (int16_t)lroundf(amp * env * 32767.0f *
+                                     sinf(2.0f * 3.14159265f * hz * (float)i / (float)sr));
         rec_pcm[i * 2] = (uint8_t)(v & 0xff);
         rec_pcm[i * 2 + 1] = (uint8_t)((v >> 8) & 0xff);
     }
     audio_play_mono(n);
+}
+
+static void ui_beep(void)                 /* toucher, bouton : discret */
+{
+    bip_doux(520.0f, 60, 0.07f);
+}
+
+/* le signal du chat vocal : deux notes descendantes, douces et courtes */
+static void ui_chime(void)
+{
+    if (!rec_pcm) return;
+    bip_doux(988.0f, 80, 0.09f);
+    vTaskDelay(pdMS_TO_TICKS(30));
+    bip_doux(740.0f, 110, 0.09f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -6931,6 +7647,11 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "heap_dma", (double)heap_caps_get_free_size(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "reset", (double)esp_reset_reason());
     cJSON_AddStringToObject(r, "wifi_ssid", wifi_ssid_i(0));
+    cJSON_AddStringToObject(r, "wifi_actif", wifi_actif);
+    cJSON_AddStringToObject(r, "cal_titre", ms_titre);
+    cJSON_AddBoolToObject(r, "cal_ical", ical_url[0] != 0);
+    cJSON_AddStringToObject(r, "cal_heure", ms_heure);
+    cJSON_AddNumberToObject(r, "cal_dans", ms_dans);
     cJSON_AddBoolToObject(r, "wifi_enregistre", wifi_rt ? 1 : 0);
     cJSON_AddNumberToObject(r, "heap_dma_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "heap_interne_max",
@@ -7210,6 +7931,11 @@ static void api_start(void)
     u.handler = h_langue; u.uri = "/langue"; httpd_register_uri_handler(srv, &u);
     u.handler = h_infos;  u.uri = "/infos";  httpd_register_uri_handler(srv, &u);
     u.handler = h_wscan;  u.uri = "/wscan";   httpd_register_uri_handler(srv, &u);
+    u.handler = h_caltoken; u.uri = "/caltoken"; u.method = HTTP_POST;
+    httpd_register_uri_handler(srv, &u);
+    u.handler = h_maj;   u.uri = "/maj";      u.method = HTTP_POST;
+    httpd_register_uri_handler(srv, &u); u.method = HTTP_GET;
+    u.handler = h_ical;  u.uri = "/ical";     httpd_register_uri_handler(srv, &u);
     u.handler = h_wifi;   u.uri = "/wifi";    httpd_register_uri_handler(srv, &u);
     u.handler = h_reglages; u.uri = "/reglages"; httpd_register_uri_handler(srv, &u);
     u.handler = h_minuteur; u.uri = "/minuteur"; httpd_register_uri_handler(srv, &u);

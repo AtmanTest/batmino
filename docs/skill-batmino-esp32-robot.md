@@ -363,6 +363,40 @@ Un tampon de 64-256 Ko en PSRAM fait CHUTER le debit a 0,4-0,6 Mo/s.
 Ce n'est PAS un swap OS : pas de MMU sur ESP32-S3, aucune pagination. C'est un
 stockage explicite (memcpy PSRAM <-> zone brute).
 
+## Calendrier Outlook publie (.ics) : trois pieges payes
+
+Le compte refuse le consentement aux applis tierces (Graph/device code), donc la
+voie retenue est le calendrier **publie** en lecture seule (`/ical?u=<lien>`,
+lien garde en NVS cles `mino`/`ical`, diagnostic dans `GET /ical`).
+`tools/outlook_attente.py` et `tools/cal_installe.py` ne servent plus qu'a la
+voie Graph, gardee en secours.
+
+1. **Un corps TLS de plus de 4 Ko etait tronque a ~2 Ko.** Symptome : `/ical`
+   annoncait `octets: 2001` (variable) et `vevent: 0`, journal
+   `esp-tls-mbedtls: read error :-0x7100` (WANT_READ) en boucle. Cause :
+   `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096` alors qu'Outlook envoie des
+   enregistrements de 16 Ko. Regle : **16384** (les tampons vont en PSRAM via
+   `MBEDTLS_EXTERNAL_MEM_ALLOC`, aucune RAM interne perdue). Verifier avec
+   `GET /ical` : `octets` doit valoir la taille complete (~70 Ko ici).
+2. **Jamais de requete reseau dans un gestionnaire httpd** : la tache httpd a
+   12 Ko de pile (pas assez pour TLS) et se bloquait 20 s, ce qui tuait aussi
+   `/state` et la page de reglages. Le telechargement vit dans une tache
+   dediee (`cal_travail`, pile 16 Ko en PSRAM, reveillee par
+   `xTaskNotifyGive`) ; `/ical?u=` repond en 40 ms et la lecture se fait
+   derriere.
+3. **Les tampons `static` des gestionnaires mangent la RAM interne** : deux
+   `static char buf[32768]` dans `/fichier` prenaient 64 Ko, et le wifi ne
+   pouvait plus allouer ses tampons de reception (`wifi:mem fail` dans le
+   journal, `heap_interne_max` tombe a 5 Ko). Ils sont maintenant en PSRAM.
+   Sante : `heap_interne_max` >= 30 Ko.
+
+L'annonce vocale part une seule fois quand il reste <= 15 min (`voix_dit`), et
+l'accueil affiche `HH:MM titre` quand c'est <= 90 min. Les heures `TZID=UTC`
+sont converties (avant, elles etaient lues comme heure de Paris, 2 h de trop).
+
+Verifier de bout en bout sans internet : deposer un .ics sur la carte
+(`POST /fichier?p=/test.ics`) puis pointer `/ical?u=http://127.0.0.1/fichier?p=/test.ics`.
+
 ## Restaurer le firmware apres un flash de bench
 
     cd /home/taz/mino-fw && python -m esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 \

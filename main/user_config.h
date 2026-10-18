@@ -85,6 +85,7 @@
 #define METEO_URL   "https://api.open-meteo.com/v1/forecast?latitude=" METEO_LAT \
                     "&longitude=" METEO_LON "&current=temperature_2m,weather_code" \
                     "&timezone=Europe%2FParis"
-#define METEO_PERIODE_S 3600         /* on rafraichit la meteo toutes les heures */
+#define METEO_PERIODE_S 900          /* rafraichie toutes les 15 min (Open-Meteo
+                                        ne bouge pas plus vite) */
 
 #endif // !USER_CONFIG_H
