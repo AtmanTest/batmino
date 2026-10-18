@@ -1,6 +1,6 @@
 ---
 name: batmino-esp32-robot
-description: "Build, flash and bench the BATMino ESP32-S3 robot."
+description: "Use when working on the BATMino ESP32-S3 e-paper robot: build, flash, bench, debug display/audio/SD."
 ---
 
 # BATMino — robot tamagotchi ESP32-S3 e-paper
