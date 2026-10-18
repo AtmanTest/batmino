@@ -76,3 +76,39 @@ c'est le plancher du matériel). Les mesures, elles, sont prises chaque seconde.
 - **ESP-IDF n'expose pas les compteurs de l'interface Wi-Fi** (pas de MIB2 dans
   son lwIP, `mib2_counters` n'existe pas). On compte donc les octets applicatifs
   (http_get, envoi STT) — c'est ce qui circule vraiment pour la voix.
+
+## PAGE_REG (2) : les reglages
+
+Trois vues, naviguees avec les deux boutons :
+
+1. **menu** : WIFI (nom du reseau actuel), ECRAN (cadence de la page systeme,
+   5/10/30 s), INFOS (log serie). En bas, l'adresse a ouvrir depuis le
+   telephone.
+2. **liste des reseaux** : scan dedie (tache separee, cache de 14 reseaux trie
+   par RSSI, doublons fusionnes), 5 lignes a l'ecran, selection en inverse.
+3. **clavier** : 6x5 touches, alphabetique, ESP / EFF / OK / 123 (chiffres et
+   symboles), mot de passe affiche en clair avec un curseur.
+
+Commandes : bouton 1 = suivant, bouton 2 = choisir/taper, appui long 1 =
+effacer, appui long 2 = valider ou remonter d'un cran, double appui 1 = sauter
+une rangee de touches.
+
+Le reseau change a chaud : le SSID et le mot de passe sont ecrits en NVS
+(namespace `mino`, cles `ssid` / `pass`), l'ancien est oublie, et au demarrage
+suivant c'est celui-la qui est utilise. Si la connexion echoue, `wifi_try`
+passe aux reseaux compiles dans `secrets.h` : on ne se coupe jamais les pieds.
+
+### Depuis le telephone
+
+`http://<ip>/reglages` sert une page de 2 Ko : liste des reseaux avec le
+signal, choix, mot de passe dans une invite, et champ manuel pour un reseau
+cache. C'est la voie normale pour taper un mot de passe : 30 caracteres au
+clavier du robot, c'est 300 appuis a 600 ms.
+
+API : `/wscan[?go=1]`, `/wifi?ssid=..&pass=..`, `/reglages`.
+
+### Voir l'ecran en vrai
+
+`/ecran?raw=1` renvoie le framebuffer en hexadecimal (10000 caracteres).
+`python3 tools/shot.py sortie.png` le convertit en PNG 400x400, ce qui permet
+de juger un dessin sans photographier la dalle.

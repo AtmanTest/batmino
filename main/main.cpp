@@ -259,8 +259,9 @@ static void draw_status_bar(void);
 #define PAGE_MAITRE 0
 /* deux pages seulement : l'accueil (ou vit la conversation) et le systeme */
 #define PAGE_SYS    1
-#define PAGE_COUNT  2
-static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "SYSTEM"};
+#define PAGE_REG    2
+#define PAGE_COUNT  3
+static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "SYSTEM", "REGLAGES"};
 
 /* ui_page / ui_face / menu_* : declares plus haut (pres de show_face) */
 static float ui_temp = 0.0f, ui_humi = 0.0f;
@@ -2093,6 +2094,168 @@ static void sys_ko(char *b, size_t n, uint32_t ko)
     else            snprintf(b, n, "%u KO", (unsigned)ko);
 }
 
+
+/* acces au wifi et au scan, definis plus bas (section WiFi) */
+static const char *wifi_ssid_i(int i);
+static void reg_scan_lance(void);
+static bool reg_scan_encours(void);
+static int  reg_scan_n(void);
+static const char *reg_scan_ssid(int i);
+static int  reg_scan_rssi(int i);
+
+/* ------------------------------------------------------------------ */
+/* Page REGLAGES : wifi (liste + clavier), ecran, infos                */
+/* ------------------------------------------------------------------ */
+#define REG_MENU    0
+#define REG_WIFI    1
+#define REG_CLAVIER 2
+
+static int reg_vue = REG_MENU;
+static int reg_ligne = 0;
+static int reg_sel = 0;
+static int reg_page_k = 0;
+static char reg_ssid[33] = "";
+static char reg_pass[65] = "";
+static int  reg_cadence = 5;      /* secondes entre deux images (page systeme) */
+
+static const char *K_LETTRES[] = {"a","b","c","d","e","f","g","h","i","j","k","l",
+                                  "m","n","o","p","q","r","s","t","u","v","w","x",
+                                  "y","z","ESP","EFF","OK","123"};
+static const char *K_SIGNES[]  = {"0","1","2","3","4","5","6","7","8","9",
+                                  ".","-","_","@",":","/","#","?","!","&",
+                                  "ESP","EFF","OK","abc"};
+#define K_LETTRES_N ((int)(sizeof(K_LETTRES) / sizeof(K_LETTRES[0])))
+#define K_SIGNES_N  ((int)(sizeof(K_SIGNES) / sizeof(K_SIGNES[0])))
+
+static int reg_touches_n(void) { return reg_page_k ? K_SIGNES_N : K_LETTRES_N; }
+static const char *reg_touche(int i)
+{
+    if (reg_page_k) return (i < K_SIGNES_N) ? K_SIGNES[i] : "";
+    return (i < K_LETTRES_N) ? K_LETTRES[i] : "";
+}
+
+static const char *ip_courante(void)
+{
+    static char ip[20] = "";
+    esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t in;
+    if (nif && esp_netif_get_ip_info(nif, &in) == ESP_OK && in.ip.addr)
+        esp_ip4addr_ntoa(&in.ip, ip, sizeof(ip));
+    else
+        snprintf(ip, sizeof(ip), "192.168.8.210");
+    return ip;
+}
+
+static void reg_rect(int x, int y, int w, int h, int black)
+{
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++)
+            a_px(x + i, y + j, black);
+}
+
+static void reg_tronque(char *d, size_t n, const char *s)
+{
+    snprintf(d, n, "%s", s ? s : "");
+}
+
+static void draw_app_reglages(void)
+{
+    char b[64], v[48];
+
+    if (reg_vue == REG_MENU) {
+        a_text(6, 2, 3, "REGLAGES");
+        a_hline(4, 195, 19, 1);
+        const char *nom[3] = {"WIFI", "ECRAN", "INFOS"};
+        for (int i = 0; i < 3; i++) {
+            int y = 28 + i * 30;
+            snprintf(v, sizeof(v), "%s", nom[i]);
+            if (i == reg_ligne) {
+                reg_rect(4, y - 5, 192, 22, 1);
+                a_text_col(10, y, 3, v, 0);
+            } else {
+                a_text(10, y, 3, v);
+            }
+            const char *d = "";
+            if (i == 0) d = wifi_ssid_i(0);
+            else if (i == 1) { static char c[16]; snprintf(c, sizeof(c), "%dS", reg_cadence); d = c; }
+            else d = "v1.0";
+            if (d && d[0]) {
+                int w = a_text_w(2, d);
+                if (w > 110) { char t[24]; snprintf(t, sizeof(t), "%.12s", d); d = t; w = a_text_w(2, d); }
+                if (i == reg_ligne) a_text_col(194 - w, y + 3, 2, d, 0);
+                else                a_text(194 - w, y + 3, 2, d);
+            }
+        }
+        a_hline(4, 195, 128, 1);
+        a_text_c(100, 138, 2, "1: suivant   2: choisir");
+        a_text_c(100, 158, 2, "brancher le tel :");
+        snprintf(b, sizeof(b), "%s/reglages", ip_courante());
+        a_text_c(100, 176, 2, b);
+        return;
+    }
+
+    if (reg_vue == REG_WIFI) {
+        a_text(6, 2, 2, "RESEAUX");
+        if (reg_scan_encours()) a_text(120, 2, 2, "scan...");
+        a_hline(4, 195, 15, 1);
+        if (!reg_scan_n()) {
+            a_text_c(100, 80, 2, "aucun reseau");
+            a_text_c(100, 100, 2, "relancer le scan ?");
+        }
+        int premier = reg_sel > 4 ? reg_sel - 4 : 0;
+        for (int k = 0; k < 5 && premier + k < reg_scan_n(); k++) {
+            int i = premier + k;
+            int y = 20 + k * 26;
+            snprintf(b, sizeof(b), "%s", reg_scan_ssid(i));
+            snprintf(v, sizeof(v), "%d", reg_scan_rssi(i));
+            if (i == reg_sel) {
+                reg_rect(4, y - 3, 192, 22, 1);
+                a_text_col(10, y, 2, b, 0);
+                a_text_col(194 - a_text_w(2, v), y, 2, v, 0);
+            } else {
+                a_text(10, y, 2, b);
+                a_text(194 - a_text_w(2, v), y, 2, v);
+            }
+        }
+        a_hline(4, 195, 156, 1);
+        a_text_c(100, 162, 2, "1: suivant   2: choisir");
+        a_text_c(100, 178, 2, "2 long : retour");
+        return;
+    }
+
+    /* --- clavier --- */
+    a_text(4, 2, 2, reg_ssid[0] ? reg_ssid : "reseau");
+    /* le mot de passe en clair : il est seul devant son robot */
+    {
+        char p[24];
+        snprintf(p, sizeof(p), "%.21s", reg_pass);
+        a_text(4, 13, 2, p);
+        int w = a_text_w(2, p);
+        if (strlen(reg_pass) < 21) a_hline(4 + w + 2, 4 + w + 8, 20, 1);  /* curseur */
+    }
+    a_hline(4, 195, 25, 1);
+    {
+        int n = reg_touches_n();
+        for (int i = 0; i < n; i++) {
+            int col = i % 6, row = i / 6;
+            int x = 4 + col * 32, y = 28 + row * 31;
+            reg_rect(x, y, 31, 29, 0);            /* fond blanc */
+            a_hline(x, x + 30, y, 1);
+            a_hline(x, x + 30, y + 28, 1);
+            a_vline(x, y, y + 28, 1);
+            a_vline(x + 30, y, y + 28, 1);
+            if (i == reg_sel) reg_rect(x + 1, y + 1, 29, 27, 1);  /* selection noire */
+            const char *t = reg_touche(i);
+            int w = a_text_w(2, t);
+            int tx = x + (31 - w) / 2;
+            if (i == reg_sel) a_text_col(tx, y + 10, 2, t, 0);
+            else              a_text(tx, y + 10, 2, t);
+        }
+    }
+    a_hline(4, 195, 184, 1);
+    a_text_c(100, 188, 1, "1:SUIVANT 2:OK 1L:EFF 2L:VALIDER");
+}
+
 static void draw_app_sys(void)
 {
     char b[64], v[80];
@@ -2266,6 +2429,8 @@ static void show_ui(void)
         fb_oy = 0;
         switch (ui_page) {
         case PAGE_MAITRE:  anim_ph++; draw_app_maitre();  break;
+        case PAGE_SYS:     draw_app_sys();    break;
+        case PAGE_REG:     draw_app_reglages(); break;
         default:           draw_app_sys();     break;
         }
         plein = (ui_page != last_drawn_page) ||
@@ -2652,8 +2817,13 @@ static void tache_arrete(void)
     voix_etat = 0;
 }
 
+
+static void reg_bouton(int n);
+static void reg_bouton_long(int n);
+
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
+    if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
     if (n == 0) {
         assistant_wake();                 /* bouton 1 : la conversation, depuis n'importe ou */
     } else {
@@ -2661,6 +2831,7 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         tache_arrete();
         if (tache) ui_page = PAGE_MAITRE;            /* on sort de la tache */
         else       ui_page = (ui_page + 1) % PAGE_COUNT;
+        if (ui_page == PAGE_REG) { reg_vue = REG_MENU; reg_ligne = 0; reg_scan_lance(); }
     }
     ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-parler" : "2-page", PAGE_NOM[ui_page]);
     show_ui();
@@ -2668,14 +2839,20 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
 
 static void bouton_double(int n)
 {
-    /* reserve : pour l'instant le double appui ne fait rien (et surtout il ne
-       rejoue pas l'action du simple appui, deja declenchee) */
+    /* sur le clavier, un double appui sur le bouton 1 saute une rangee de 6
+       touches : taper un mot de passe avec deux boutons reste long */
+    if (ui_page == PAGE_REG && reg_vue == REG_CLAVIER && n == 0) {
+        reg_sel = (reg_sel + 6) % reg_touches_n();
+        show_ui();
+        return;
+    }
     ESP_LOGI(TAG, "bouton %s : double appui (reserve)", n == 0 ? "1" : "2");
 }
 
 static void bouton_long(int n, int tres_long)
 {
     (void)tres_long;
+    if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
     if (n == 0) assistant_wake();         /* appui long : je t'ecoute */
     show_ui();
 }
@@ -2947,7 +3124,7 @@ static void ui_task(void *arg)
         if (ui_page == PAGE_SYS) {
             static int64_t sys_derniere_ui = 0;
             int64_t ms = esp_timer_get_time() / 1000;
-            if (ms - sys_derniere_ui >= SYS_PERIODE_MS) {
+            if (ms - sys_derniere_ui >= reg_cadence * 1000) {
                 sys_derniere_ui = ms;
                 show_ui();
             }
@@ -3176,19 +3353,228 @@ static const char *WIFI_TRIES[] = { WIFI_SSID, WIFI_SSID_ALT, WIFI_SSID_ALT2 };
 static int wifi_try = 0;
 #define WIFI_NTRIES (sizeof(WIFI_TRIES) / sizeof(WIFI_TRIES[0]))
 
+static char wifi_ssid_rt[33] = "";
+static char wifi_pass_rt[65] = "";
+static bool wifi_rt = false;          /* une config a ete enregistree en NVS */
+
+static const char *wifi_ssid_i(int i)
+{
+    if (i == 0 && wifi_rt) return wifi_ssid_rt;
+    return WIFI_TRIES[i];
+}
+
+static const char *wifi_pass_i(int i)
+{
+    if (i == 0 && wifi_rt) return wifi_pass_rt;
+    return WIFI_PASS;
+}
+
 static esp_err_t wifi_set_ssid(int i)
 {
     wifi_config_t wc = {};
-    strncpy((char *)wc.sta.ssid, WIFI_TRIES[i], sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, WIFI_PASS, sizeof(wc.sta.password) - 1);
+    strncpy((char *)wc.sta.ssid, wifi_ssid_i(i), sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, wifi_pass_i(i), sizeof(wc.sta.password) - 1);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     esp_err_t r = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (r == ESP_OK)
-        ESP_LOGI(TAG, "WiFi -> tentative sur '%s'", WIFI_TRIES[i]);
+        ESP_LOGI(TAG, "WiFi -> tentative sur '%s'", wifi_ssid_i(i));
     else
-        ESP_LOGW(TAG, "WiFi : config '%s' refusee (%s)", WIFI_TRIES[i], esp_err_to_name(r));
+        ESP_LOGW(TAG, "WiFi : config '%s' refusee (%s)", wifi_ssid_i(i), esp_err_to_name(r));
     return r;
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Reglages : le reseau WiFi se change sans recompiler                 */
+/* ------------------------------------------------------------------ */
+static void wifi_reglages_charge(void)
+{
+    nvs_handle_t nh;
+    if (nvs_open("mino", NVS_READONLY, &nh) != ESP_OK) return;
+    size_t ls = sizeof(wifi_ssid_rt), lp = sizeof(wifi_pass_rt);
+    if (nvs_get_str(nh, "ssid", wifi_ssid_rt, &ls) == ESP_OK && ls > 1) {
+        wifi_pass_rt[0] = 0;
+        lp = sizeof(wifi_pass_rt);
+        nvs_get_str(nh, "pass", wifi_pass_rt, &lp);
+        wifi_rt = true;
+        ESP_LOGI(TAG, "reglages : reseau enregistre '%s'", wifi_ssid_rt);
+    }
+    nvs_close(nh);
+}
+
+static void wifi_reglages_sauve(void)
+{
+    nvs_handle_t nh;
+    if (nvs_open("mino", NVS_READWRITE, &nh) != ESP_OK) return;
+    nvs_set_str(nh, "ssid", wifi_ssid_rt);
+    nvs_set_str(nh, "pass", wifi_pass_rt);
+    nvs_commit(nh);
+    nvs_close(nh);
+}
+
+/* changer de borne : on enregistre, on repart sur ce reseau */
+static void wifi_bascule(const char *ssid, const char *pass)
+{
+    strncpy(wifi_ssid_rt, ssid, sizeof(wifi_ssid_rt) - 1);
+    wifi_ssid_rt[sizeof(wifi_ssid_rt) - 1] = 0;
+    strncpy(wifi_pass_rt, pass ? pass : "", sizeof(wifi_pass_rt) - 1);
+    wifi_pass_rt[sizeof(wifi_pass_rt) - 1] = 0;
+    wifi_rt = true;
+    wifi_try = 0;
+    retry_count = 0;
+    wifi_reglages_sauve();
+    ESP_LOGI(TAG, "reglages : bascule sur '%s'", wifi_ssid_rt);
+    esp_wifi_disconnect();
+    wifi_set_ssid(0);
+    esp_wifi_connect();
+}
+
+/* ---- liste des reseaux vus, remplie par une tache dediee ---- */
+#define WSCAN_MAX 14
+typedef struct {
+    char ssid[33];
+    int8_t rssi;
+    uint8_t auth;
+} wscan_t;
+
+static wscan_t g_wscan[WSCAN_MAX];
+static int g_wscan_n = 0;
+static volatile bool g_wscan_demande = false;
+static volatile bool g_wscan_encours = false;
+
+static void wscan_tache(void *arg)
+{
+    for (;;) {
+        if (!g_wscan_demande) { vTaskDelay(10); continue; }
+        g_wscan_demande = false;
+        g_wscan_encours = true;
+        wifi_scan_config_t sc = {};
+        if (esp_wifi_scan_start(&sc, true) == ESP_OK) {
+            uint16_t n = 0;
+            esp_wifi_scan_get_ap_num(&n);
+            if (n > 32) n = 32;
+            wifi_ap_record_t *aps = (wifi_ap_record_t *)calloc(n ? n : 1, sizeof(wifi_ap_record_t));
+            if (aps) {
+                if (n && esp_wifi_scan_get_ap_records(&n, aps) == ESP_OK) {
+                    int k = 0;
+                    for (int i = 0; i < (int)n && k < WSCAN_MAX; i++) {
+                        if (!aps[i].ssid[0]) continue;
+                        bool vu = false;
+                        for (int j = 0; j < k; j++)
+                            if (!strcmp(g_wscan[j].ssid, (char *)aps[i].ssid)) {
+                                vu = true;
+                                if (aps[i].rssi > g_wscan[j].rssi) g_wscan[j].rssi = aps[i].rssi;
+                                break;
+                            }
+                        if (vu) continue;
+                        strncpy(g_wscan[k].ssid, (char *)aps[i].ssid, sizeof(g_wscan[k].ssid) - 1);
+                        g_wscan[k].ssid[sizeof(g_wscan[k].ssid) - 1] = 0;
+                        g_wscan[k].rssi = aps[i].rssi;
+                        g_wscan[k].auth = aps[i].authmode;
+                        k++;
+                    }
+                    /* tri : les plus forts d'abord */
+                    for (int i = 1; i < k; i++) {
+                        wscan_t t = g_wscan[i];
+                        int j = i - 1;
+                        while (j >= 0 && g_wscan[j].rssi < t.rssi) { g_wscan[j + 1] = g_wscan[j]; j--; }
+                        g_wscan[j + 1] = t;
+                    }
+                    g_wscan_n = k;
+                    ESP_LOGI(TAG, "reglages : %d reseaux vus", k);
+                }
+                free(aps);
+            }
+        } else {
+            ESP_LOGW(TAG, "reglages : scan refuse");
+        }
+        g_wscan_encours = false;
+        if (ui_page == PAGE_REG && reg_vue == REG_WIFI) show_ui();   /* la liste est prete */
+    }
+}
+
+/* petits accesseurs : le dessin de la page est plus haut dans le fichier */
+static void reg_scan_lance(void) { g_wscan_demande = true; }
+static bool reg_scan_encours(void) { return g_wscan_encours || g_wscan_demande; }
+static int reg_scan_n(void) { return g_wscan_n; }
+static const char *reg_scan_ssid(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].ssid : ""; }
+static int reg_scan_rssi(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].rssi : 0; }
+
+/* ---- boutons de la page REGLAGES ---- */
+static void reg_clavier_touche(void)
+{
+    const char *t = reg_touche(reg_sel);
+    if (!strcmp(t, "OK")) {
+        if (reg_ssid[0]) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
+        return;
+    }
+    if (!strcmp(t, "EFF")) {
+        size_t n = strlen(reg_pass);
+        if (n) reg_pass[n - 1] = 0;
+        return;
+    }
+    if (!strcmp(t, "123")) { reg_page_k = 1; reg_sel = 0; return; }
+    if (!strcmp(t, "abc")) { reg_page_k = 0; reg_sel = 0; return; }
+    if (!strcmp(t, "ESP")) t = " ";
+    size_t n = strlen(reg_pass);
+    if (n < sizeof(reg_pass) - 1) { reg_pass[n] = t[0]; reg_pass[n + 1] = 0; }
+}
+
+static void reg_bouton(int n)
+{
+    if (reg_vue == REG_MENU) {
+        if (n == 0) {
+            reg_ligne = (reg_ligne + 1) % 3;
+        } else {
+            if (reg_ligne == 0) {
+                reg_vue = REG_WIFI;
+                reg_sel = 0;
+                g_wscan_demande = true;
+            } else if (reg_ligne == 1) {
+                reg_cadence = reg_cadence == 5 ? 10 : (reg_cadence == 10 ? 30 : 5);
+            } else {
+                ESP_LOGI(TAG, "reglages : %s / %s / %d dBm / %d o libres", wifi_ssid_i(0),
+                         ip_courante(), (int)sec_rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            }
+        }
+        return;
+    }
+    if (reg_vue == REG_WIFI) {
+        if (n == 0) {
+            if (g_wscan_n) reg_sel = (reg_sel + 1) % g_wscan_n;
+            else g_wscan_demande = true;
+        } else {
+            if (!reg_scan_n()) { g_wscan_demande = true; return; }
+            snprintf(reg_ssid, sizeof(reg_ssid), "%s", g_wscan[reg_sel].ssid);
+            reg_pass[0] = 0;
+            reg_page_k = 0;
+            reg_sel = 0;
+            reg_vue = REG_CLAVIER;
+        }
+        return;
+    }
+    /* clavier */
+    if (n == 0) reg_sel = (reg_sel + 1) % reg_touches_n();
+    else        reg_clavier_touche();
+}
+
+static void reg_bouton_long(int n)
+{
+    if (n == 0) {                     /* effacer */
+        if (reg_vue == REG_CLAVIER) {
+            size_t l = strlen(reg_pass);
+            if (l) reg_pass[l - 1] = 0;
+        }
+        return;
+    }
+    /* bouton 2 long : valider au clavier, sinon remonter d'un cran */
+    if (reg_vue == REG_CLAVIER) {
+        if (reg_ssid[0]) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
+    } else if (reg_vue == REG_WIFI) {
+        reg_vue = REG_MENU;
+    }
+}
+
 
 static void wifi_scan_log(void)
 {
@@ -3234,6 +3620,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static void wifi_start(void)
 {
+    wifi_reglages_charge();
     wifi_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -3251,6 +3638,8 @@ static void wifi_start(void)
     wifi_scan_log();
     wifi_set_ssid(wifi_try);
     esp_wifi_connect();
+    /* la liste des reseaux se remplit a la demande, pas a l'appel HTTP */
+    xTaskCreate(wscan_tache, "wscan", 4096, NULL, 2, NULL);
 }
 
 /* L'horloge repartait de zero a chaque demarrage : la date et l'heure etaient
@@ -3823,6 +4212,22 @@ static esp_err_t h_ecran(httpd_req_t *req)
         show_ui();
         voix_etat = sauv_etat;
         voix_bouche = sauv_b;
+    }
+    char raw[8] = "";
+    if (qval(req, "raw", raw, sizeof(raw)) == ESP_OK && raw[0] == '1') {
+        /* le framebuffer brut en hexadecimal : 5000 octets = 10000 caracteres,
+           pour regarder l'ecran en PNG sur le PC au lieu de l'ASCII 2x2 */
+        static const char hx[] = "0123456789abcdef";
+        char *o = (char *)malloc(FB_LEN * 2 + 1);
+        if (!o) { httpd_resp_sendstr(req, "pas de memoire"); return ESP_ERR_NO_MEM; }
+        for (int i = 0; i < FB_LEN; i++) {
+            o[i * 2] = hx[fb[i] >> 4];
+            o[i * 2 + 1] = hx[fb[i] & 15];
+        }
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, o, FB_LEN * 2);
+        free(o);
+        return ESP_OK;
     }
     httpd_resp_set_type(req, "text/plain");
     char ligne[112];
@@ -6490,6 +6895,126 @@ static esp_err_t h_soul(httpd_req_t *req)
     return ESP_OK;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* API des reglages : /wscan, /wifi, /reglages (page pour le telephone) */
+/* ------------------------------------------------------------------ */
+static void url_decode(char *d)
+{
+    char *s = d, *o = d;
+    while (*s) {
+        if (*s == '%' && s[1] && s[2]) {
+            char h[3] = {s[1], s[2], 0};
+            *o++ = (char)strtol(h, NULL, 16);
+            s += 3;
+        } else if (*s == '+') {
+            *o++ = ' ';
+            s++;
+        } else {
+            *o++ = *s++;
+        }
+    }
+    *o = 0;
+}
+
+static esp_err_t h_wscan(httpd_req_t *req)
+{
+    char q[160] = "";
+    if (httpd_req_get_url_query_len(req) > 0 &&
+        httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char go[8];
+        if (httpd_query_key_value(q, "go", go, sizeof(go)) == ESP_OK && go[0] == '1')
+            g_wscan_demande = true;
+    }
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "encours", (g_wscan_encours || g_wscan_demande) ? 1 : 0);
+    cJSON_AddStringToObject(o, "actuel", wifi_ssid_i(0));
+    cJSON *ap = cJSON_AddArrayToObject(o, "ap");
+    for (int i = 0; i < g_wscan_n; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "s", g_wscan[i].ssid);
+        cJSON_AddNumberToObject(e, "r", g_wscan[i].rssi);
+        cJSON_AddNumberToObject(e, "a", g_wscan[i].auth);
+        cJSON_AddItemToArray(ap, e);
+    }
+    char *js = cJSON_PrintUnformatted(o);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, js ? js : "{}");
+    free(js);
+    cJSON_Delete(o);
+    return ESP_OK;
+}
+
+static esp_err_t h_wifi(httpd_req_t *req)
+{
+    char q[400] = "";
+    char ssid[80] = "", pass[120] = "";
+    if (httpd_req_get_url_query_len(req) > 0)
+        httpd_req_get_url_query_str(req, q, sizeof(q));
+    if (!q[0] || httpd_query_key_value(q, "ssid", ssid, sizeof(ssid)) != ESP_OK) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"ssid manquant\"}");
+        return ESP_OK;
+    }
+    if (httpd_query_key_value(q, "pass", pass, sizeof(pass)) != ESP_OK) pass[0] = 0;
+    url_decode(ssid);
+    url_decode(pass);
+    if (!ssid[0]) {
+        httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"ssid vide\"}");
+        return ESP_OK;
+    }
+    wifi_bascule(ssid, pass);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* la page de reglages, servie par le robot : on s'en sert depuis le telephone */
+static const char PAGE_REGLAGES[] =
+"<!doctype html><html lang=fr><meta charset=utf-8>"
+"<meta name=viewport content='width=device-width,initial-scale=1'>"
+"<title>MINO</title><style>"
+"body{font:16px system-ui;margin:0;padding:16px;background:#111;color:#eee}"
+"h1{font-size:20px;margin:0 0 4px}p{color:#999;margin:4px 0 16px}"
+".ap{display:flex;justify-content:space-between;padding:12px;margin:6px 0;"
+"background:#1e1e1e;border-radius:10px}.ap:active{background:#333}"
+".r{color:#6c6}.w{color:#eb4}b{color:#6af}"
+"input,button{font:16px system-ui;padding:10px;border-radius:8px;border:0;width:100%;box-sizing:border-box}"
+"button{background:#2d7;color:#000;font-weight:600;margin-top:8px}"
+"#msg{color:#eb4;margin:8px 0}</style>"
+"<h1>MINO</h1><p id=cur>...</p>"
+"<div id=liste></div><div id=msg></div>"
+"<input id=ssid placeholder='nom du reseau (reseau cache)'>"
+"<input id=pass type=password placeholder='mot de passe'>"
+"<button onclick='envoie()'>Connecter</button>"
+"<script>"
+"async function scan(){"
+"let r=await(await fetch('/wscan?go=1')).json();"
+"if(r.encours){setTimeout(scan,1500);return}"
+"document.getElementById('cur').textContent='reseau actuel : '+(r.actuel||'aucun');"
+"let l=document.getElementById('liste');l.innerHTML='';"
+"r.ap.forEach(a=>{let d=document.createElement('div');d.className='ap';"
+"let b=a.r>-55?'r':(a.r>-70?'w':'');"
+"d.innerHTML='<span>'+a.s+(a.a?'':' (ouvert)')+'</span><span class='+b+'>'+a.r+' dBm</span>';"
+"d.onclick=()=>{document.getElementById('ssid').value=a.s;"
+"if(a.a){let p=prompt('mot de passe pour '+a.s);if(p===null)return;"
+"fetch('/wifi?ssid='+encodeURIComponent(a.s)+'&pass='+encodeURIComponent(p))"
+".then(x=>x.json()).then(j=>document.getElementById('msg').textContent=j.ok?'connecte, redemarrage du wifi...':'erreur');}"
+"else fetch('/wifi?ssid='+encodeURIComponent(a.s)+'&pass=')"
+".then(()=>document.getElementById('msg').textContent='connecte');};"
+"l.appendChild(d)})}"
+"function envoie(){let s=document.getElementById('ssid').value,"
+"p=document.getElementById('pass').value;"
+"fetch('/wifi?ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p))"
+".then(x=>x.json()).then(j=>document.getElementById('msg').textContent=j.ok?'enregistre':'erreur')}"
+"scan();</script>";
+
+static esp_err_t h_reglages(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req, PAGE_REGLAGES, sizeof(PAGE_REGLAGES) - 1);
+    return ESP_OK;
+}
+
 static void api_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -6528,6 +7053,9 @@ static void api_start(void)
     u.handler = h_modele; u.uri = "/modele"; httpd_register_uri_handler(srv, &u);
     u.handler = h_langue; u.uri = "/langue"; httpd_register_uri_handler(srv, &u);
     u.handler = h_infos;  u.uri = "/infos";  httpd_register_uri_handler(srv, &u);
+    u.handler = h_wscan;  u.uri = "/wscan";   httpd_register_uri_handler(srv, &u);
+    u.handler = h_wifi;   u.uri = "/wifi";    httpd_register_uri_handler(srv, &u);
+    u.handler = h_reglages; u.uri = "/reglages"; httpd_register_uri_handler(srv, &u);
     u.handler = h_minuteur; u.uri = "/minuteur"; httpd_register_uri_handler(srv, &u);
     u.handler = h_timer; u.uri = "/timer"; httpd_register_uri_handler(srv, &u);
     u.handler = h_bouton; u.uri = "/bouton"; httpd_register_uri_handler(srv, &u);

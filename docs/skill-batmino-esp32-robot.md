@@ -187,6 +187,28 @@ Sauvegarde : `~/mino-backup-usb.sh` + timer systemd utilisateur
 `/run/media/taz/MINO-ESP32/backup`, journal `~/mino-backup.log`. Le cron Hermes
 n'est pas fiable ici : il exige la passerelle locale demarree.
 
+## Les pages : accueil, systeme, reglages
+
+Trois pages : `PAGE_MAITRE` (0), `PAGE_SYS` (1), `PAGE_REG` (2).
+
+`PAGE_REG` a trois vues : menu (WIFI / ECRAN / INFOS), liste des reseaux (scan
+en tache separee, cache trie par RSSI) et un clavier 6x5 pour le mot de passe.
+
+- bouton 1 = suivant, bouton 2 = choisir, long 1 = effacer, long 2 = valider
+  ou remonter, **double appui 1 = sauter 6 touches**.
+- Le reseau change a chaud : SSID et mot de passe ecrits en NVS (namespace
+  `mino`, cles `ssid`/`pass`). Si la connexion echoue, `wifi_try` repasse aux
+  SSID compiles dans `secrets.h` : on ne se coupe jamais les pieds.
+- Taper un mot de passe au clavier, c'est 300 appuis a 600 ms. La vraie voie
+  c'est le telephone : `http://<ip>/reglages` (page de 2 Ko servie par le
+  robot). API : `/wscan[?go=1]`, `/wifi?ssid=..&pass=..`.
+- Pour juger un dessin sans photographier la dalle : `/ecran?raw=1` renvoie le
+  framebuffer en hexadecimal, `python3 tools/shot.py sortie.png` en fait un PNG
+  400x400.
+
+Les tests : `bash tests/api.sh <ip>` est rapide (0,2 s, sans voix ni cerveau) ;
+`bash tests/api.sh <ip> complet` ajoute /dit, /tts et la zone d'echange.
+
 ## Les pages (v0.9) : accueil + systeme
 
 Il n'y a plus que DEUX pages : `PAGE_MAITRE` (0) et `PAGE_SYS` (1). Les pages
