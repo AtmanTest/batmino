@@ -35,6 +35,23 @@ rien n'a été détruit, /radio et /timer répondent toujours.
 | FLASH | SPIFFS occupé / total + barre | esp_spiffs_info("storage") |
 | pied | adresse IP | netif_default |
 
+## Memoire : chaque page rend ce qu'elle a pris
+
+Le changement de page ne laisse rien derriere lui :
+
+| ressource | quand | liberation |
+|-----------|-------|-----------|
+| `TaskStatus_t[48]` (~1,8 Ko) | a l'entree sur SYSTEM | a la sortie (`free`) |
+| unite ADC (batterie) | au premier dessin de SYSTEM | a la sortie (`adc_oneshot_del_unit`) |
+| echantillonnage CPU/reseau | seulement page SYSTEM | arret immediat en sortant |
+
+Verifie sur la carte, trois allers-retours : RAM interne constante a 17539 o,
+PSRAM qui oscille de 1828 o exactement entre les deux pages (l'allocation du
+tableau de taches) et qui revient a sa valeur de depart. Aucune fuite.
+
+`/state` lit la batterie dans un cache : sinon la simple requete HTTP
+rallumerait l'ADC et garderait la ressource allouee.
+
 ## Cadence
 
 Une image de cette page toutes les 5 s (573 ms de clignotement à chaque image,

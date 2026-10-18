@@ -1949,11 +1949,12 @@ static int sys_hist_n = 0, sys_hist_tete = 0;
 /* Compteurs d'execution FreeRTOS : la somme des temps de tache donne le temps
    reellement occupe, sur les deux coeurs. (Le hook idle ne marchait pas ici :
    il ne se declenchait pas assez souvent a 100 Hz pour etre exploitable.) */
-static TaskStatus_t sys_ts[48];
+static TaskStatus_t *sys_ts = NULL;      /* alloue seulement sur la page SYSTEM */
 
 static void sys_cpu_maj(void)
 {
     static uint32_t somme0 = 0, total0 = 0;
+    if (!sys_ts) return;
     uint32_t total = 0;
     UBaseType_t n = uxTaskGetSystemState(sys_ts, 48, &total);
     uint32_t somme = 0;
@@ -1982,6 +1983,8 @@ static void sys_cpu_maj(void)
 /* --- batterie : GPIO4 (BAT_ADC), pont 200K/200K -> VBAT = 2 x VADC --- */
 static adc_oneshot_unit_handle_t sys_adc = NULL;
 static bool sys_adc_init = false;
+static int sys_bat_mv_cache = -1;    /* derniere mesure, pour /state (sans ADC) */
+static int sys_bat_pct_cache = -1;
 
 static int sys_bat_mv(void)
 {
@@ -2042,6 +2045,34 @@ static void sys_echantillon(void)
 {
     sys_cpu_maj();
     sys_net_maj();
+}
+
+/* La page SYSTEM est la seule "app" qui alloue quelque chose. En entrant on
+   alloue (PSRAM, jamais la RAM interne qui est comptee), en sortant on rend
+   tout : plus de tableau de taches, plus d'unite ADC, plus d'echantillonnage.
+   Comme ca une page au premier plan ne laisse RIEN derriere elle. */
+static bool sys_est_active = false;
+
+static void sys_page_entre(void)
+{
+    if (sys_est_active) return;
+    sys_est_active = true;
+    if (!sys_ts) sys_ts = (TaskStatus_t *)heap_caps_malloc(48 * sizeof(TaskStatus_t),
+                                                          MALLOC_CAP_SPIRAM);
+    sys_hist_n = 0; sys_hist_tete = 0; sys_cpu = 0; sys_cpu10 = 0;
+    sys_net_ms = 0; sys_rx_s = 0; sys_tx_s = 0;
+    if (!sys_ts) ESP_LOGW(TAG, "systeme : pas de PSRAM pour les stats de taches");
+}
+
+static void sys_page_sort(void)
+{
+    if (!sys_est_active) return;
+    sys_est_active = false;
+    if (sys_ts) { free(sys_ts); sys_ts = NULL; }
+    if (sys_adc) { adc_oneshot_del_unit(sys_adc); sys_adc = NULL; }
+    sys_adc_init = false;
+    ESP_LOGI(TAG, "systeme : page quittee, memoire rendue (interne %u o libres)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 /* --- petits utilitaires de dessin --- */
@@ -2130,6 +2161,8 @@ static void draw_app_sys(void)
     {
         int mv = sys_bat_mv();
         int bp = sys_bat_pct(mv);
+        sys_bat_mv_cache = mv;
+        sys_bat_pct_cache = bp;
         a_text(6, 117, 1, "BATTERIE");
         if (bp < 0) {
             a_text(120, 115, 2, "USB");
@@ -2925,7 +2958,9 @@ static void ui_task(void *arg)
         }
         /* page SYSTEM : mesure chaque seconde, mais une image toutes les 5 s
            (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
-        sys_echantillon();
+        if (ui_page == PAGE_SYS) sys_page_entre();
+        else                     sys_page_sort();
+        if (ui_page == PAGE_SYS) sys_echantillon();
         if (ui_page == PAGE_SYS) {
             static int64_t sys_derniere_ui = 0;
             int64_t ms = esp_timer_get_time() / 1000;
@@ -6393,9 +6428,10 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "cpu_pct", sys_cpu);
     cJSON_AddNumberToObject(r, "cpu_pct10", sys_cpu10);
     {
-        int mv = sys_bat_mv();
-        cJSON_AddNumberToObject(r, "bat_mv", mv);
-        cJSON_AddNumberToObject(r, "bat_pct", sys_bat_pct(mv));
+        /* valeur en cache : /state ne doit pas rallumer l'ADC de la page
+           systeme, sinon la mesure garde la ressource allouee en permanence */
+        cJSON_AddNumberToObject(r, "bat_mv", sys_bat_mv_cache);
+        cJSON_AddNumberToObject(r, "bat_pct", sys_bat_pct_cache);
     }
     {
         uint64_t tot = 0, lib = 0;
