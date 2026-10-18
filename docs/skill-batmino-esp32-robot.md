@@ -264,6 +264,23 @@ Effet de bord : `erase-flash` vide la NVS, donc la cle d'API et le SSID
 enregistre reviennent aux valeurs compilees dans `secrets.h`. C'est sans danger,
 mais a savoir avant de le faire.
 
+### Se debloquer sans cable reseau
+
+Le robot n'a pas d'ecran de secours : une faute de frappe dans le mot de passe
+le coupe du monde. Trois garde-fous sont en place, dans cet ordre :
+
+1. `/wifi` refuse un mot de passe de moins de 8 caracteres sur un reseau ferme
+   (un WPA2 a 2 caracteres ne peut pas marcher) et le dit a la page web.
+2. Si le reseau enregistre ne repond pas pendant 3 min, le robot efface
+   `ssid`/`pass` de la NVS et repart sur les SSID compiles (`wifi_secours()`).
+3. Sinon, par USB, sans reflasher :
+   `esptool.py -p /dev/ttyACM0 erase_region 0x9000 0x6000` puis
+   `esptool.py -p /dev/ttyACM0 run` — efface la NVS seule (config, cle d'API,
+   etat du compagnon) et garde le firmware.
+
+`/state` expose `wifi_ssid` et `wifi_enregistre` : c'est ce qui a permis de voir
+que la NVS contenait un mot de passe de 2 caracteres.
+
 ### Le TLS qui echoue sans rien dire
 
 `esp-aes: Failed to allocate memory` en pleine requete HTTPS (le LLM ou le TTS
