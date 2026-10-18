@@ -30,6 +30,9 @@
 #include "esp_http_server.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_cpu.h"
+#include "esp_adc/adc_oneshot.h"
+#include "lwip/netif.h"
 #include "nvs_flash.h"
 #include "esp_spiffs.h"
 #include "cJSON.h"
@@ -254,11 +257,10 @@ static void draw_status_bar(void);
  *   5 RADIO     la radio (le PC n'est plus necessaire)
  */
 #define PAGE_MAITRE 0
-#define PAGE_PARLER 1
-#define PAGE_RADIO 2
-#define PAGE_TIMER 3
-#define PAGE_COUNT 4
-static const char *PAGE_NOM[PAGE_COUNT] = {"MAITRE", "PARLER", "RADIO", "TIMER"};
+/* deux pages seulement : l'accueil (ou vit la conversation) et le systeme */
+#define PAGE_SYS    1
+#define PAGE_COUNT  2
+static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "SYSTEM"};
 
 /* ui_page / ui_face / menu_* : declares plus haut (pres de show_face) */
 static float ui_temp = 0.0f, ui_humi = 0.0f;
@@ -1035,14 +1037,8 @@ static void app_titre(const char *nom)
     a_hline(0, 199, 25, 3);
     a_text(6, 6, 2, nom);
     /* le rappel des boutons, en petit a droite (pas sur le visage : plein) */
-    if (ui_page != PAGE_MAITRE) {
-        const char *h = NULL;
-        if (ui_page == PAGE_PARLER)      h = "LONG 1 = PARLER";
-        else if (ui_page == PAGE_RADIO)  h = "LONG 1 = JOUER/ARRET";
-        else if (ui_page == PAGE_TIMER)  h = "LONG 1 = AJOUTE";
-        else                             h = "COURT = AUTRE PAGE";
-        if (h) a_text(196 - 6 * (int)strlen(h), 10, 1, h);
-    }
+    if (ui_page == PAGE_SYS)
+        a_text(196 - 6 * 18, 10, 1, "BOUTON 2 = ACCUEIL");
 }
 
 static void app_bas(const char *txt)
@@ -1149,6 +1145,8 @@ static void draw_app_maitre(void)
         /* pas d'animation possible sur cette dalle : une image fixe par etat */
         draw_kirby(100, 126, 40, anim_ph, 0,
                    voix_etat == 3 ? 0.55f : 0.0f);
+        a_text_c(100, 176, 2, voix_etat == 1 ? "ECOUTE" :
+                             voix_etat == 2 ? "REFLEXION" : "JE PARLE");
         a_hline(6, 193, 188, 1);
         return;
     }
@@ -1645,7 +1643,7 @@ static void minuteur_sonne(void)
     for (int i = 0; i < radios_n; i++)
         if (nom_contient(radios_nom[i], "FG Radio")) { radio_sel = i; break; }
     if (radio_vol < 80) radio_vol_regle(80, 1);
-    ui_page = PAGE_RADIO;
+    ui_page = PAGE_MAITRE;
     radio_joue();
     ui_beep(); ui_beep(); ui_beep();
     show_ui();
@@ -1674,7 +1672,7 @@ static void timer_sonne(int i)
     timers[i].sonne = true;
     timers_sauve();
     ESP_LOGW(TAG, "timer/alarme %d sonne : %s", i, timers[i].nom);
-    ui_page = PAGE_TIMER;
+    ui_page = PAGE_MAITRE;
     timer_sel = i;
     timer_mode = 0;
     ui_beep(); ui_beep(); ui_beep(); ui_beep();
@@ -1937,6 +1935,252 @@ static void draw_page_set(void)
     }
 }
 
+/* ================================================================== */
+/* PAGE SYSTEM : le mini btop (cpu, ram, gpu, watts, batterie,        */
+/* reseau, stockage). C'est la seule page qui se rafraichit seule.    */
+/* ================================================================== */
+
+#define SYS_HIST 38
+static int sys_cpu = 0;        /* 0..100, arrondi (pour /state et le graphe) */
+static int sys_cpu10 = 0;      /* 0..1000, pour afficher "0.9 %" */
+static uint8_t sys_hist[SYS_HIST];
+static int sys_hist_n = 0, sys_hist_tete = 0;
+
+/* Compteurs d'execution FreeRTOS : la somme des temps de tache donne le temps
+   reellement occupe, sur les deux coeurs. (Le hook idle ne marchait pas ici :
+   il ne se declenchait pas assez souvent a 100 Hz pour etre exploitable.) */
+static TaskStatus_t sys_ts[48];
+
+static void sys_cpu_maj(void)
+{
+    static uint32_t somme0 = 0, total0 = 0;
+    uint32_t total = 0;
+    UBaseType_t n = uxTaskGetSystemState(sys_ts, 48, &total);
+    uint32_t somme = 0;
+    for (UBaseType_t i = 0; i < n; i++) {
+        /* les taches idle comptent comme du temps occupe : on les exclut,
+           sinon la somme vaut toujours 100 % des deux coeurs */
+        const char *nm = sys_ts[i].pcTaskName ? sys_ts[i].pcTaskName : "";
+        if (!strncmp(nm, "IDLE", 4)) continue;
+        somme += (uint32_t)sys_ts[i].ulRunTimeCounter;
+    }
+    if (!total0) { somme0 = somme; total0 = total; return; }
+    uint32_t dsomme = somme - somme0, dtot = total - total0;
+    somme0 = somme; total0 = total;
+    int pct10 = 0;
+    if (dtot > 0 && dtot < 50000000u)
+        pct10 = (int)((uint64_t)dsomme * 1000 / (uint64_t)dtot);  /* en "un coeur" */
+    if (pct10 < 0) pct10 = 0;
+    if (pct10 > 1000) pct10 = 1000;
+    sys_cpu10 = pct10;
+    sys_cpu = (pct10 + 5) / 10;
+    sys_hist[sys_hist_tete] = (uint8_t)sys_cpu;
+    sys_hist_tete = (sys_hist_tete + 1) % SYS_HIST;
+    if (sys_hist_n < SYS_HIST) sys_hist_n++;
+}
+
+/* --- batterie : GPIO4 (BAT_ADC), pont 200K/200K -> VBAT = 2 x VADC --- */
+static adc_oneshot_unit_handle_t sys_adc = NULL;
+static bool sys_adc_init = false;
+
+static int sys_bat_mv(void)
+{
+    if (!sys_adc_init) {
+        sys_adc_init = true;
+        adc_oneshot_unit_init_cfg_t uc = {};
+        uc.unit_id = ADC_UNIT_1;
+        if (adc_oneshot_new_unit(&uc, &sys_adc) != ESP_OK) { sys_adc = NULL; return -1; }
+        adc_oneshot_chan_cfg_t cc = {};
+        cc.atten = ADC_ATTEN_DB_12;
+        cc.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_oneshot_config_channel(sys_adc, ADC_CHANNEL_3, &cc) != ESP_OK) { sys_adc = NULL; return -1; }
+    }
+    if (!sys_adc) return -1;
+    int somme = 0, n = 0;
+    for (int i = 0; i < 8; i++) {
+        int r = 0;
+        if (adc_oneshot_read(sys_adc, ADC_CHANNEL_3, &r) == ESP_OK) { somme += r; n++; }
+    }
+    if (!n) return -1;
+    return (somme / n) * 3300 / 4095 * 2;
+}
+
+static int sys_bat_pct(int mv)
+{
+    if (mv < 2500) return -1;                 /* pas de batterie branchee */
+    if (mv >= 4200) return 100;
+    if (mv <= 3300) return 0;
+    return (mv - 3300) * 100 / (4200 - 3300);
+}
+
+/* --- reseau : octets comptes par l'application (http_get + envoi STT) ---
+   ESP-IDF n'expose pas les compteurs de l'interface Wi-Fi (pas de MIB2 dans
+   son lwIP) : on compte donc ce qui passe vraiment par nos sockets. */
+static volatile uint32_t net_rx_octets = 0, net_tx_octets = 0;
+static int64_t sys_net_ms = 0;
+static uint32_t sys_net_rx0 = 0, sys_net_tx0 = 0;
+static int sys_rx_s = 0, sys_tx_s = 0;
+
+static void sys_net_maj(void)
+{
+    uint32_t rx = net_rx_octets;
+    uint32_t tx = net_tx_octets;
+    int64_t now = esp_timer_get_time() / 1000;
+    if (sys_net_ms) {
+        int64_t dt = now - sys_net_ms;
+        if (dt > 200) {
+            sys_rx_s = (int)((int64_t)(rx - sys_net_rx0) * 1000 / dt);
+            sys_tx_s = (int)((int64_t)(tx - sys_net_tx0) * 1000 / dt);
+        }
+    }
+    sys_net_ms = now; sys_net_rx0 = rx; sys_net_tx0 = tx;
+}
+
+/* un echantillon = une image de la page, toutes les SYS_PERIODE_MS */
+#define SYS_PERIODE_MS 5000
+static void sys_echantillon(void)
+{
+    sys_cpu_maj();
+    sys_net_maj();
+}
+
+/* --- petits utilitaires de dessin --- */
+static void sys_barre(int x, int y, int w, int h, int pct)
+{
+    if (pct < 0) return;
+    if (pct > 100) pct = 100;
+    for (int i = 0; i < w; i++) { a_px(x + i, y, 1); a_px(x + i, y + h - 1, 1); }
+    for (int j = 0; j < h; j++) { a_px(x, y + j, 1); a_px(x + w - 1, y + j, 1); }
+    int f = (w - 4) * pct / 100;
+    for (int j = 1; j < h - 1; j++)
+        for (int i = 1; i <= f; i++) a_px(x + 1 + i, y + j, 1);
+}
+
+static void sys_ko(char *b, size_t n, uint32_t ko)
+{
+    if (ko >= 1024) snprintf(b, n, "%.1f MO", ko / 1024.0);
+    else            snprintf(b, n, "%u KO", (unsigned)ko);
+}
+
+static void draw_app_sys(void)
+{
+    char b[64], v[80];
+    int pct;
+
+    /* ---- bandeau ---- */
+    a_text(6, 3, 2, "SYSTEM");
+    {
+        int up = (int)(esp_timer_get_time() / 1000000);
+        snprintf(b, sizeof(b), "UP %02d:%02d", up / 3600, (up / 60) % 60);
+        a_text(194 - a_text_w(1, b), 4, 1, b);
+    }
+    a_hline(4, 195, 16, 1);
+
+    /* ---- CPU ---- */
+    a_text(6, 21, 1, "CPU");
+    snprintf(v, sizeof(v), "%d.%d%%", sys_cpu10 / 10, sys_cpu10 % 10);
+    a_text(28, 18, 3, v);
+    snprintf(b, sizeof(b), "%d MHZ", (int)(esp_clk_cpu_freq() / 1000000));
+    a_text(194 - a_text_w(1, b), 21, 1, b);
+    {
+        int x0 = 6, y0 = 36, h = 18;
+        for (int i = 0; i < SYS_HIST; i++) {
+            int val = 0;
+            if (i < sys_hist_n) {
+                int idx = (sys_hist_tete - sys_hist_n + i + SYS_HIST) % SYS_HIST;
+                val = sys_hist[idx];
+            }
+            int hb = val * (h - 1) / 100;
+            for (int yy = 0; yy <= hb; yy++)
+                for (int xx = 0; xx < 4; xx++)
+                    a_px(x0 + i * 5 + xx, y0 + h - 1 - yy, 1);
+        }
+        a_hline(x0, x0 + SYS_HIST * 5 - 2, y0 + h, 1);
+    }
+
+    /* ---- RAM interne ---- */
+    {
+        int lib = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        int tot = (int)heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+        pct = tot > 0 ? (tot - lib) * 100 / tot : 0;
+        a_text(6, 61, 1, "RAM");
+        sys_ko(b, sizeof(b), (uint32_t)(lib / 1024));
+        snprintf(v, sizeof(v), "%s LIBRES", b);
+        a_text(194 - a_text_w(1, v), 61, 1, v);
+        sys_barre(6, 69, 188, 6, pct);
+    }
+    /* ---- PSRAM ---- */
+    {
+        int lib = (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        int tot = (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        pct = tot > 0 ? (tot - lib) * 100 / tot : 0;
+        a_text(6, 80, 1, "PSRAM");
+        sys_ko(b, sizeof(b), (uint32_t)(lib / 1024));
+        snprintf(v, sizeof(v), "%s LIBRES", b);
+        a_text(194 - a_text_w(1, v), 80, 1, v);
+        sys_barre(6, 88, 188, 6, pct);
+    }
+
+    /* ---- GPU (il n'y en a pas) + consommation ---- */
+    a_text(6, 101, 1, "GPU  AUCUN");
+    snprintf(v, sizeof(v), "%.2f W", conso_mw() / 1000.0);
+    a_text(194 - a_text_w(2, v), 99, 2, v);
+
+    /* ---- batterie ---- */
+    {
+        int mv = sys_bat_mv();
+        int bp = sys_bat_pct(mv);
+        a_text(6, 117, 1, "BATTERIE");
+        if (bp < 0) {
+            a_text(120, 115, 2, "USB");
+        } else {
+            snprintf(v, sizeof(v), "%d%% %.2fV", bp, mv / 1000.0);
+            a_text(194 - a_text_w(2, v), 115, 2, v);
+            sys_barre(6, 126, 188, 6, bp);
+        }
+    }
+
+    /* ---- reseau ---- */
+    {
+        a_text(6, 137, 1, "RESEAU");
+        snprintf(v, sizeof(v), "V %d.%dK  ^ %d.%dK", sys_rx_s / 1024, (sys_rx_s % 1024) / 102,
+                 sys_tx_s / 1024, (sys_tx_s % 1024) / 102);
+        a_text(194 - a_text_w(1, v), 137, 1, v);
+    }
+
+    /* ---- stockage ---- */
+    {
+        uint64_t tot = 0, lib = 0;
+        a_text(6, 149, 1, "SD");
+        if (sd_ok && esp_vfs_fat_info("/sdcard", &tot, &lib) == ESP_OK && tot) {
+            snprintf(v, sizeof(v), "%.0f / %.0f GO", (tot - lib) / 1073741824.0,
+                     tot / 1073741824.0);
+            a_text(194 - a_text_w(1, v), 149, 1, v);
+            sys_barre(6, 157, 188, 6, (int)((tot - lib) * 100 / tot));
+        } else {
+            a_text(194 - a_text_w(1, "ABSENTE"), 149, 1, "ABSENTE");
+        }
+    }
+    {
+        size_t st = 0, su = 0;
+        a_text(6, 168, 1, "FLASH");
+        if (esp_spiffs_info("storage", &st, &su) == ESP_OK && st) {
+            snprintf(v, sizeof(v), "%u / %u KO", (unsigned)(su / 1024), (unsigned)(st / 1024));
+            a_text(194 - a_text_w(1, v), 168, 1, v);
+            sys_barre(6, 176, 188, 6, (int)(su * 100 / st));
+        }
+    }
+
+    /* ---- pied ---- */
+    a_hline(4, 195, 186, 1);
+    {
+        struct netif *n = netif_default;
+        const char *ip = (n && n->ip_addr.u_addr.ip4.addr) ? ipaddr_ntoa(&n->ip_addr) : "PAS DE WIFI";
+        snprintf(v, sizeof(v), "%.40s", ip);
+        a_text_c(100, 190, 1, v);
+    }
+}
+
 static int last_drawn_page = -1;      /* pour forcer un refresh complet au changement de page */
 static int partiels = 99;             /* partiels enchaines depuis le dernier refresh complet */
 
@@ -2006,9 +2250,7 @@ static void show_ui(void)
         fb_oy = 0;
         switch (ui_page) {
         case PAGE_MAITRE:  anim_ph++; draw_app_maitre();  break;
-        case PAGE_PARLER:  draw_app_parler();  break;
-        case PAGE_TIMER:   draw_app_timer();    break;
-        default:           draw_app_radio();   break;
+        default:           draw_app_sys();     break;
         }
         plein = (ui_page != last_drawn_page) ||
                 (partiels >= (ui_page == PAGE_MAITRE ? 40 : 10));
@@ -2153,7 +2395,7 @@ static void touch_handle(int sx, int sy, int ex, int ey, int ms)
     ESP_LOGI(TAG, "tactile (%d,%d)->(%d,%d) %d ms", sx, sy, ex, ey, ms);
 
     if (ms < 900 && abs(dx) > 30 && abs(dx) > abs(dy)) {
-        ui_page = (ui_page + (dx < 0 ? 1 : 3)) % 4;
+        ui_page = (ui_page + (dx < 0 ? 1 : PAGE_COUNT - 1)) % PAGE_COUNT;
         ESP_LOGI(TAG, "page -> %d", ui_page);
         show_ui();
         return;
@@ -2396,26 +2638,15 @@ static void tache_arrete(void)
 
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
-    if (n == 0) {                                     /* LANCER la tache de la page */
-        if (ui_page == PAGE_RADIO) {
-            if (radio_etat) radio_stop(); else radio_joue();
-        } else if (ui_page == PAGE_TIMER) {
-            bouton_long(0, 0);                        /* memes etapes que l'appui long */
-        } else {
-            assistant_wake();                         /* chat vocal */
-        }
-    } else {                                          /* QUITTER / page suivante */
-        if (ui_page == PAGE_TIMER && timer_mode == 1) {
-            timer_edit_val = (timer_edit_val + 60) % 3600;    /* edition : +1 min */
-            show_ui();
-            return;
-        }
+    if (n == 0) {
+        assistant_wake();                 /* bouton 1 : la conversation, depuis n'importe ou */
+    } else {
         bool tache = wake_busy || radio_etat || voix_etat;
         tache_arrete();
-        if (tache) ui_page = PAGE_MAITRE;              /* retour accueil */
+        if (tache) ui_page = PAGE_MAITRE;            /* on sort de la tache */
         else       ui_page = (ui_page + 1) % PAGE_COUNT;
     }
-    ESP_LOGI(TAG, "bouton %s : page %d", n == 0 ? "1-lancer" : "2-quitter", (int)ui_page);
+    ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-parler" : "2-page", PAGE_NOM[ui_page]);
     show_ui();
 }
 
@@ -2428,74 +2659,8 @@ static void bouton_double(int n)
 
 static void bouton_long(int n, int tres_long)
 {
-    if (n == 0) {                        /* BOOT */
-        if (ui_page == PAGE_RADIO) {
-            if (tres_long) {
-                radio_vol_regle(radio_vol + 10, 1);             /* appui tres long : + fort */
-            } else if (radio_etat) {
-                radio_stop();
-            } else {
-                radio_joue();
-            }
-        } else if (ui_page == PAGE_TIMER) {
-            if (timer_mode == 0) {
-                if (min_preset_s == 0) {
-                    ui_beep(); ui_beep();                       /* duree sur OFF : rien a creer */
-                } else if (!timers[timer_sel].fin_s) {          /* slot libre -> creer */
-                    int64_t now = (int64_t)time(NULL);
-                    timers[timer_sel].fin_s = now + (int64_t)min_preset_s;
-                    timers[timer_sel].duree_s = min_preset_s;
-                    {
-                        char nm[40];
-                        snprintf(nm, sizeof(nm), "Minuteur %d min", (int)(min_preset_s / 60));
-                        snprintf(timers[timer_sel].nom, sizeof(timers[timer_sel].nom),
-                                 "%.20s", nm);
-                    }
-                    timers[timer_sel].est_alarme = false;
-                    timers[timer_sel].repet = false;
-                    timers[timer_sel].sonne = false;
-                    timers_sauve();
-                    ESP_LOGI(TAG, "timer cree : %d min", (int)(min_preset_s / 60));
-                } else {
-                    timer_mode = 1;                             /* editer celui-ci */
-                    timer_edit_val = timers[timer_sel].duree_s;
-                }
-            } else if (timer_mode == 1) {                       /* valider la duree */
-                timers[timer_sel].duree_s = timer_edit_val;
-                timers[timer_sel].fin_s = (int64_t)time(NULL) + (int64_t)timer_edit_val;
-                timers_sauve();
-                timer_mode = 2;                                 /* puis le nom */
-            } else if (timer_mode == 2) {                       /* valider le nom */
-                timer_mode = 0;
-            } else if (timer_mode == 3) {                       /* confirmer suppression */
-                memset(&timers[timer_sel], 0, sizeof(timers[timer_sel]));
-                timers_sauve();
-                timer_mode = 0;
-            }
-        } else {
-            assistant_wake();                                   /* ailleurs : je t'ecoute */
-        }
-    } else {                             /* PWR */
-        if (ui_page == PAGE_RADIO) {
-            radio_change(1);                                    /* station suivante */
-        } else if (ui_page == PAGE_TIMER) {
-            int durees[] = {300, 600, 900, 1800, 3600, 0};      /* 5,10,15,30,60 min */
-            int idx = 0;
-            while (idx < 5 && durees[idx] != min_preset_s) idx++;
-            min_preset_s = durees[(idx + 1) % 6];
-            ESP_LOGI(TAG, "timer preset : %d min", (int)(min_preset_s / 60));
-            ui_beep();
-        } else {
-            min_preset_s = (min_preset_s == 5)  ? 10 :
-                           (min_preset_s == 10) ? 15 :
-                           (min_preset_s == 15) ? 30 :
-                           (min_preset_s == 30) ? 60 : (min_preset_s == 60) ? 0 : 5;
-            if (min_preset_s > 0) min_fin_us = esp_timer_get_time() + (int64_t)min_preset_s * 1000000;
-            else                  min_fin_us = 0;
-            ESP_LOGI(TAG, "minuteur radio : %d min", (int)(min_preset_s / 60));
-            ui_beep();
-        }
-    }
+    (void)tres_long;
+    if (n == 0) assistant_wake();         /* appui long : je t'ecoute */
     show_ui();
 }
 
@@ -2691,7 +2856,7 @@ static void pet_task(void *arg)
                 for (int i = 0; i < radios_n; i++) {
                     if (nom_contient(radios_nom[i], radio_ordre)) {
                         radio_sel = i;
-                        ui_page = PAGE_RADIO;
+                        ui_page = PAGE_MAITRE;
                         radio_joue();
                         ESP_LOGI(TAG, "voix : radio %s", radios_nom[i]);
                         break;
@@ -2758,7 +2923,18 @@ static void ui_task(void *arg)
             last_secu = (int)now;
             secu_refresh();
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        /* page SYSTEM : mesure chaque seconde, mais une image toutes les 5 s
+           (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
+        sys_echantillon();
+        if (ui_page == PAGE_SYS) {
+            static int64_t sys_derniere_ui = 0;
+            int64_t ms = esp_timer_get_time() / 1000;
+            if (ms - sys_derniere_ui >= SYS_PERIODE_MS) {
+                sys_derniere_ui = ms;
+                show_ui();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -3457,7 +3633,6 @@ static esp_err_t h_timer(httpd_req_t *req)
             cJSON_AddItemToArray(a, t);
         }
     }
-    if (ui_page == PAGE_TIMER) show_ui();
     return send_json(req, r);
 }
 
@@ -3478,7 +3653,6 @@ static esp_err_t h_minuteur(httpd_req_t *req)
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "restant_s", (double)minuteur_restant_s());
     cJSON_AddStringToObject(r, "sonne", "FG Radio");
-    if (min_fin_us && ui_page == PAGE_RADIO) show_ui();
     return send_json(req, r);
 }
 
@@ -3731,6 +3905,8 @@ static esp_err_t stt_groq(const uint8_t *wav, int wav_len, char *out, size_t out
                    (r = esp_http_client_read(c, rep + n, sizeof(rep) - 1 - n)) > 0)
                 n += r;
             rep[n] = 0;
+            net_tx_octets += (uint32_t)(hl + wav_len + fl);
+            net_rx_octets += (uint32_t)n;
             if (status != 200) {
                 ESP_LOGW(TAG, "Groq STT HTTP %d : %.160s", status, rep);
             } else {
@@ -3862,6 +4038,7 @@ static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
         int o = 0, r;
         while (o < cap && (r = esp_http_client_read(c, (char *)buf + o, cap - o)) > 0) o += r;
         res = (status == 200) ? o : -status;
+        if (res > 0) net_rx_octets += (uint32_t)res;
     }
     esp_http_client_close(c);
     esp_http_client_cleanup(c);
@@ -5492,7 +5669,7 @@ static void mino_handle_line(const char *line)
            l'ecran « JE REFLECHIS » (la tache de reveil voit voix_etat changer) */
         snprintf(voix_reponse, sizeof(voix_reponse), "%.200s", line + 7);
         voix_etat = 3;
-        ui_page = PAGE_PARLER;
+        ui_page = PAGE_MAITRE;
         show_ui();
         ESP_LOGI(TAG, "reponse affichee : %.60s", voix_reponse);
         return;
@@ -5797,6 +5974,24 @@ static void mino_handle_line(const char *line)
    !st              etat du driver                                                        */
 static void console_epd(const char *c)
 {
+    if (!strcmp(c, "cpu")) {          /* qui consomme le CPU ? */
+        char *b = (char *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+        if (b) { vTaskGetRunTimeStats(b); ESP_LOGI(TAG, "taches:\n%s", b); free(b); }
+        else ESP_LOGW(TAG, "banc : pas de tampon pour les stats");
+        {
+            uint32_t total = 0;
+            UBaseType_t n = uxTaskGetSystemState(sys_ts, 48, &total);
+            uint32_t somme = 0, somme_idle = 0;
+            for (UBaseType_t i = 0; i < n; i++) {
+                const char *nm = sys_ts[i].pcTaskName ? sys_ts[i].pcTaskName : "";
+                if (!strncmp(nm, "IDLE", 4)) somme_idle += (uint32_t)sys_ts[i].ulRunTimeCounter;
+                else somme += (uint32_t)sys_ts[i].ulRunTimeCounter;
+            }
+            ESP_LOGI(TAG, "banc : cpu=%d%% n=%d total=%u somme=%u idle=%u",
+                     sys_cpu, (int)n, (unsigned)total, (unsigned)somme, (unsigned)somme_idle);
+        }
+        return;
+    }
     if (!epd) { ESP_LOGW(TAG, "banc : pas de dalle"); return; }
     if (!strcmp(c, "busy") || !strcmp(c, "st")) {
         ESP_LOGI(TAG, "banc : BUSY=%d panne=%d busy_ko=%d refus=%d",
@@ -6026,7 +6221,7 @@ static esp_err_t h_say(httpd_req_t *req)
         bat5_du_pet = famille_vers_bat5(current_emotion);
         snprintf(voix_reponse, sizeof(voix_reponse), "%.200s", dit);
         voix_etat = 3;                        /* je reponds, en grand */
-        ui_page = PAGE_PARLER;
+        ui_page = PAGE_MAITRE;
         show_ui();
         cJSON_AddStringToObject(r, "emotion", FAMILLES[current_emotion]);
         cJSON_AddStringToObject(r, "visage", EXPR[e].nom);
@@ -6195,6 +6390,20 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "mic_seuil", (double)mic_seuil);
     cJSON_AddNumberToObject(r, "conso_mw", (double)conso_mw());
     cJSON_AddNumberToObject(r, "epd_busy_ko", epd ? epd->busy_ko : -1);
+    cJSON_AddNumberToObject(r, "cpu_pct", sys_cpu);
+    cJSON_AddNumberToObject(r, "cpu_pct10", sys_cpu10);
+    {
+        int mv = sys_bat_mv();
+        cJSON_AddNumberToObject(r, "bat_mv", mv);
+        cJSON_AddNumberToObject(r, "bat_pct", sys_bat_pct(mv));
+    }
+    {
+        uint64_t tot = 0, lib = 0;
+        cJSON_AddNumberToObject(r, "net_rx_s", sys_rx_s);
+        cJSON_AddNumberToObject(r, "net_tx_s", sys_tx_s);
+        if (sd_ok && esp_vfs_fat_info("/sdcard", &tot, &lib) == ESP_OK)
+            cJSON_AddNumberToObject(r, "sd_pct", tot ? (double)((tot - lib) * 100.0 / tot) : 0);
+    }
     cJSON_AddNumberToObject(r, "bouche", (double)voix_bouche);
     cJSON_AddNumberToObject(r, "compagnon_x", (double)kirby_x);
     cJSON_AddNumberToObject(r, "compagnon_y", (double)kirby_y);

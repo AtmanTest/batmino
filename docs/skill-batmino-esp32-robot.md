@@ -187,6 +187,33 @@ Sauvegarde : `~/mino-backup-usb.sh` + timer systemd utilisateur
 `/run/media/taz/MINO-ESP32/backup`, journal `~/mino-backup.log`. Le cron Hermes
 n'est pas fiable ici : il exige la passerelle locale demarree.
 
+## Les pages (v0.9) : accueil + systeme
+
+Il n'y a plus que DEUX pages : `PAGE_MAITRE` (0) et `PAGE_SYS` (1). Les pages
+PARLER, RADIO et TIMER ont ete supprimees (le moteur radio et les timers sont
+toujours dans le code, simplement plus accessibles par l'ecran).
+
+La conversation vit sur l'accueil : `voix_etat` 1/2/3 affiche ECOUTE /
+REFLEXION / JE PARLE sous le compagnon en grand, sans changer de page.
+
+`PAGE_SYS` est un mini btop : CPU (+ graphe), RAM, PSRAM, GPU (aucun sur
+l'ESP32-S3), watts, batterie (ADC1 = GPIO4, pont 200K/200K, VBAT = 2 x VADC),
+reseau, SD et SPIFFS. Une image toutes les 5 s.
+
+### Mesurer le CPU
+
+    CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+    CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+    CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+
+puis `uxTaskGetSystemState()` et **exclure les taches dont le nom commence par
+IDLE** (sinon la somme vaut toujours 100 % des deux coeurs). Un hook idle ne
+marche pas ici : a 100 Hz de tick il n'est pas appele assez souvent (il donnait
+93 % sur un CPU au repos). Le vrai chiffre au repos est ~0,7 %.
+
+`CONFIG_LWIP_MIB2` n'existe pas dans ESP-IDF : `netif->mib2_counters` ne
+compile pas. Pour un debit reseau, compter les octets applicatifs.
+
 ## RAM interne : le piege qui casse la voix (v0.6)
 
 Symptomes : le bouton ne fait rien, ou "je n'ai pas bien compris", ou TTS -1.
