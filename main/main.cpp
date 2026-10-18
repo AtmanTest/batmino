@@ -272,6 +272,7 @@ static float ui_temp_offset = -10.0f;
 static float ui_temp_brut = 0.0f;
 static bool  ui_shtc_ok = false;
 static bool  ui_wifi_ok = false;
+static char  wifi_actif[33] = "";   /* borne sur laquelle on est connecte */
 static bool  touch_log = false;
 static SemaphoreHandle_t i2c_mux = NULL;
 static void  ui_beep(void);
@@ -1134,6 +1135,10 @@ static void draw_app_maitre(void)
     snprintf(b, sizeof(b), "%s %d %s", JOURS_SEM[ti.tm_wday % 7], ti.tm_mday,
              MOIS_AN[ti.tm_mon % 12]);
     a_text_c(100, 52, 1, b);
+
+    /* la borne wifi utilisee, en tout petit sous l'horloge */
+    if (wifi_actif[0])
+        a_text(194 - a_text_w(1, wifi_actif), 46, 1, wifi_actif);
     a_hline(6, 193, 62, 1);
 
     if (voix_etat != 0) {
@@ -3687,6 +3692,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
         ESP_LOGW(TAG, "WiFi deconnecte : raison %d", d ? d->reason : -1);
         xEventGroupClearBits(wifi_eg, WIFI_OK_BIT);
+        wifi_actif[0] = 0;
         if (retry_count < WIFI_MAX_RETRY) {
             retry_count++;
             ESP_LOGW(TAG, "WiFi perdu, tentative %d/%d sur '%s'", retry_count,
@@ -3700,7 +3706,8 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-        ESP_LOGI(TAG, "IP : " IPSTR "  (reseau '%s')", IP2STR(&ev->ip_info.ip), WIFI_TRIES[wifi_try]);
+        snprintf(wifi_actif, sizeof(wifi_actif), "%s", wifi_ssid_i(wifi_try));
+        ESP_LOGI(TAG, "IP : " IPSTR "  (reseau '%s')", IP2STR(&ev->ip_info.ip), wifi_actif);
         retry_count = 0;
         xEventGroupSetBits(wifi_eg, WIFI_OK_BIT);
     }
