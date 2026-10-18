@@ -2180,7 +2180,8 @@ static void draw_app_reglages(void)
             }
             const char *d = "";
             if (i == 0) d = wifi_ssid_i(0);
-            else if (i == 1) { static char c[16]; snprintf(c, sizeof(c), "%dS", reg_cadence); d = c; }
+            /* le chiffre seul : dans cette police le S ressemble a un 5 */
+            else if (i == 1) { static char c[16]; snprintf(c, sizeof(c), "%d", reg_cadence); d = c; }
             else d = "v1.0";
             if (d && d[0]) {
                 int w = a_text_w(2, d);
@@ -2190,10 +2191,12 @@ static void draw_app_reglages(void)
             }
         }
         a_hline(4, 195, 128, 1);
-        a_text_c(100, 138, 2, "1: suivant   2: choisir");
-        a_text_c(100, 158, 2, "brancher le tel :");
-        snprintf(b, sizeof(b), "%s/reglages", ip_courante());
-        a_text_c(100, 176, 2, b);
+        a_text_c(100, 136, 2, "1:SUIVANT 2:CHOISIR");
+        a_text_c(100, 152, 1, "appui long 2 : quitter");
+        snprintf(b, sizeof(b), "http://%s", ip_courante());
+        a_text_c(100, 164, 2, b);
+        a_text_c(100, 178, 2, "/reglages");
+        a_text_c(100, 192, 1, "en http, pas https");
         return;
     }
 
@@ -2256,8 +2259,9 @@ static void draw_app_reglages(void)
             else              a_text(tx, y + 10, 2, t);
         }
     }
-    a_hline(4, 195, 184, 1);
-    a_text_c(100, 188, 1, "1:SUIVANT 2:OK 1L:EFF 2L:VALIDER");
+    a_hline(4, 195, 182, 1);
+    a_text_c(100, 185, 1, "1 SUIVANT   2 TAPER   1 LONG EFFACER");
+    a_text_c(100, 193, 1, "2 LONG VALIDER   2 DOUBLE QUITTER");
 }
 
 static void draw_app_sys(void)
@@ -2850,6 +2854,13 @@ static void bouton_double(int n)
         show_ui();
         return;
     }
+    /* double appui 2 au clavier : abandonner la saisie et revenir a la liste */
+    if (ui_page == PAGE_REG && reg_vue == REG_CLAVIER && n == 1) {
+        reg_pass[0] = 0;
+        reg_vue = REG_WIFI;
+        show_ui();
+        return;
+    }
     ESP_LOGI(TAG, "bouton %s : double appui (reserve)", n == 0 ? "1" : "2");
 }
 
@@ -2894,7 +2905,7 @@ static void button_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(60));
                 held++;
             }
-            if (held >= 18) bouton_long(0, held >= 40);
+            if (held >= 10) bouton_long(0, held >= 40);      /* 600 ms : au-dela c'est long */
             else if (held >= 1) {
                 int64_t now = esp_timer_get_time();
                 if (now - dernier_court[0] < 400000) bouton_double(0);
@@ -2908,7 +2919,7 @@ static void button_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(60));
                 held++;
             }
-            if (held >= 18) bouton_long(1, 0);
+            if (held >= 10) bouton_long(1, 0);               /* 600 ms */
             else if (held >= 1) {
                 int64_t now = esp_timer_get_time();
                 if (now - dernier_court[1] < 400000) bouton_double(1);
@@ -3379,6 +3390,8 @@ static esp_err_t wifi_set_ssid(int i)
     strncpy((char *)wc.sta.ssid, wifi_ssid_i(i), sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, wifi_pass_i(i), sizeof(wc.sta.password) - 1);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wc.sta.pmf_cfg.capable = true;      /* certains routeurs l'exigent */
+    wc.sta.pmf_cfg.required = false;
     esp_err_t r = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (r == ESP_OK)
         ESP_LOGI(TAG, "WiFi -> tentative sur '%s'", wifi_ssid_i(i));
@@ -3401,7 +3414,8 @@ static void wifi_reglages_charge(void)
         lp = sizeof(wifi_pass_rt);
         nvs_get_str(nh, "pass", wifi_pass_rt, &lp);
         wifi_rt = true;
-        ESP_LOGI(TAG, "reglages : reseau enregistre '%s'", wifi_ssid_rt);
+        ESP_LOGI(TAG, "reglages : reseau enregistre '%s', mot de passe de %d caracteres",
+                 wifi_ssid_rt, (int)strlen(wifi_pass_rt));
     }
     nvs_close(nh);
 }
@@ -3573,6 +3587,10 @@ static void reg_bouton(int n)
 
 static void reg_bouton_long(int n)
 {
+    if (reg_vue == REG_MENU) {        /* appui long 2 : on sort des reglages */
+        if (n == 1) { ui_page = PAGE_MAITRE; }
+        return;
+    }
     if (n == 0) {                     /* effacer */
         if (reg_vue == REG_CLAVIER) {
             size_t l = strlen(reg_pass);
@@ -3602,7 +3620,8 @@ static void wifi_scan_log(void)
     if (esp_wifi_scan_get_ap_records(&n, aps) == ESP_OK) {
         ESP_LOGI(TAG, "--- %d reseaux visibles par Mino ---", n);
         for (int i = 0; i < n && i < 25; i++)
-            ESP_LOGI(TAG, "  %4d dBm  canal %2d  %s", aps[i].rssi, aps[i].primary, aps[i].ssid);
+            ESP_LOGI(TAG, "  %4d dBm  canal %2d  auth %d  phy %d  %s", aps[i].rssi, aps[i].primary,
+                     (int)aps[i].authmode, (int)aps[i].phy_11b, aps[i].ssid);
     }
     free(aps);
 }
@@ -3612,6 +3631,8 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         xEventGroupSetBits(wifi_eg, 1);   /* pilote pret : on ne connecte pas encore */
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
+        ESP_LOGW(TAG, "WiFi deconnecte : raison %d", d ? d->reason : -1);
         if (retry_count < WIFI_MAX_RETRY) {
             retry_count++;
             ESP_LOGW(TAG, "WiFi perdu, tentative %d/%d sur '%s'", retry_count,
@@ -3645,6 +3666,9 @@ static void wifi_start(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_evt, NULL, NULL));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    /* le S3 est wifi 6 (11ax) et la borne est wifi 7 : le handshake echouait
+       (raison 15/205) alors que le mot de passe est bon. On reste en 11n. */
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
     ESP_ERROR_CHECK(esp_wifi_start());
     xEventGroupWaitBits(wifi_eg, 1, pdTRUE, pdTRUE, pdMS_TO_TICKS(5000));
     vTaskDelay(pdMS_TO_TICKS(1500));
@@ -6410,6 +6434,26 @@ static void mino_handle_line(const char *line)
    !st              etat du driver                                                        */
 static void console_epd(const char *c)
 {
+    /* !wifi                : etat
+       !wifi <ssid> <pass>  : bascule a chaud (marche meme sans reseau) */
+    if (!strncmp(c, "wifi", 4)) {
+        const char *a = c + 4;
+        while (*a == ' ') a++;
+        if (!*a) {
+            ESP_LOGI(TAG, "banc : reseau '%s' (enregistre : %d)", wifi_ssid_i(0), wifi_rt);
+            return;
+        }
+        char s[33] = "", p[65] = "";
+        const char *e = strchr(a, ' ');
+        size_t n = e ? (size_t)(e - a) : strlen(a);
+        if (n > 32) n = 32;
+        memcpy(s, a, n);
+        s[n] = 0;
+        if (e) { while (*e == ' ') e++; snprintf(p, sizeof(p), "%s", e); }
+        ESP_LOGI(TAG, "banc : bascule sur '%s' (mot de passe de %d caracteres)", s, (int)strlen(p));
+        wifi_bascule(s, p);
+        return;
+    }
     if (!strcmp(c, "cpu")) {          /* qui consomme le CPU ? */
         char *b = (char *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
         if (b) { vTaskGetRunTimeStats(b); ESP_LOGI(TAG, "taches:\n%s", b); free(b); }
@@ -6790,8 +6834,18 @@ static esp_err_t h_pet(httpd_req_t *req)
     return send_json(req, r);
 }
 
+static esp_err_t h_reglages(httpd_req_t *req);   /* defini plus bas */
+
 static esp_err_t h_status(httpd_req_t *req)
 {
+    /* un navigateur demande du HTML : on lui donne la page de reglages, pour
+       que http://192.168.8.210 fonctionne directement (curl recoit le JSON) */
+    {
+        char acc[80] = "";
+        if (httpd_req_get_hdr_value_str(req, "Accept", acc, sizeof(acc)) == ESP_OK &&
+            strstr(acc, "text/html"))
+            return h_reglages(req);
+    }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddStringToObject(r, "qui", "Mino");
     cJSON_AddStringToObject(r, "emotion", FAMILLES[current_emotion]);

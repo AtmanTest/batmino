@@ -242,6 +242,23 @@ marche pas ici : a 100 Hz de tick il n'est pas appele assez souvent (il donnait
 `CONFIG_LWIP_MIB2` n'existe pas dans ESP-IDF : `netif->mib2_counters` ne
 compile pas. Pour un debit reseau, compter les octets applicatifs.
 
+### Le WiFi qui refuse le mot de passe (raison 15/205)
+
+Symptome : le robot se deconnecte en boucle avec `raison 15` (4-way handshake
+timeout) puis `205`, alors que le mot de passe est bon (un autre poste se
+connecte avec le meme, verifie a la main), que la borne est a -30 dBm et que le
+scan la voit parfaitement. Tout ce qu'on peut changer cote code (PMF, 11n
+force, autre MAC, seuil d'authentification) ne change rien.
+
+Cause : les donnees de calibration PHY stockees en NVS sont corrompues. La
+reception marche (le scan voit tout), l'emission ne passe plus. **Remede :
+`idf.py -p /dev/ttyACM0 erase-flash` puis reflasher.** Le robot se reconnecte
+immediatement.
+
+Effet de bord : `erase-flash` vide la NVS, donc la cle d'API et le SSID
+enregistre reviennent aux valeurs compilees dans `secrets.h`. C'est sans danger,
+mais a savoir avant de le faire.
+
 ### Le TLS qui echoue sans rien dire
 
 `esp-aes: Failed to allocate memory` en pleine requete HTTPS (le LLM ou le TTS
