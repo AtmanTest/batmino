@@ -200,6 +200,12 @@ REFLEXION / JE PARLE sous le compagnon en grand, sans changer de page.
 l'ESP32-S3), watts, batterie (ADC1 = GPIO4, pont 200K/200K, VBAT = 2 x VADC),
 reseau, SD et SPIFFS. Une image toutes les 5 s.
 
+Une page ne laisse rien en memoire : le tableau `TaskStatus_t` (1,8 Ko, en
+PSRAM) et l'unite ADC sont alloues A L'ENTREE sur PAGE_SYS et liberes a la
+sortie, et l'echantillonnage s'arrete. `/state` lit la batterie en cache, sinon
+un simple appel HTTP rallumerait l'ADC. Le framebuffer est commun aux pages :
+dessiner une page ecrase la precedente, il n'y a pas de tampon par page.
+
 ### Mesurer le CPU
 
     CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
