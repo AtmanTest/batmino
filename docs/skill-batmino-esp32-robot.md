@@ -220,6 +220,18 @@ marche pas ici : a 100 Hz de tick il n'est pas appele assez souvent (il donnait
 `CONFIG_LWIP_MIB2` n'existe pas dans ESP-IDF : `netif->mib2_counters` ne
 compile pas. Pour un debit reseau, compter les octets applicatifs.
 
+### Le TLS qui echoue sans rien dire
+
+`esp-aes: Failed to allocate memory` en pleine requete HTTPS (le LLM ou le TTS
+sortent en `ESP_FAIL` / HTTP 0, sans autre indice) : l'AES **materiel** du S3
+reclame un tampon DMA interne continu et le pool DMA est minuscule (~10 Ko
+libres, plus gros bloc ~5,8 Ko). Desactiver `CONFIG_MBEDTLS_HARDWARE_AES` :
+l'AES logiciel suffit pour des requetes de quelques Ko. Ajouter aussi
+`CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096` (au lieu de 16 Ko) et
+`CONFIG_MBEDTLS_DYNAMIC_BUFFER=y`. Symptome typique : les tests passent une
+fois sur deux, le premier appel marche puis le suivant non.
+
+
 ## RAM interne : le piege qui casse la voix (v0.6)
 
 Symptomes : le bouton ne fait rien, ou "je n'ai pas bien compris", ou TTS -1.
