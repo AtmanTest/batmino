@@ -187,6 +187,36 @@ Sauvegarde : `~/mino-backup-usb.sh` + timer systemd utilisateur
 `/run/media/taz/MINO-ESP32/backup`, journal `~/mino-backup.log`. Le cron Hermes
 n'est pas fiable ici : il exige la passerelle locale demarree.
 
+## Boutons : une gestuelle, une action
+
+Regles valables partout (implementees dans `button_task`) :
+
+- **appui simple** = action principale, tout de suite (sauf au clavier, ou
+  l'action attend 320 ms pour laisser la place au double appui).
+- **appui long = 600 ms, et il part PENDANT l'appui**, pas au relachement :
+  avant, rien ne se passait tant que le doigt restait, donc on rappuyait.
+- **double appui = 320 ms d'ecart, seulement au clavier** (sauter 6 touches,
+  abandonner la saisie). Avant, le premier appui executait deja son action :
+  un double faisait "touche + saut".
+- Un appui de moins de 40 ms est ignore (anti-rebond).
+
+Sur l'accueil : 1 = parler, 2 = page suivante, **2 long = retour accueil et
+arret** (avant, 2 long ne faisait rien hors reglages). Dans les reglages :
+1 = suivant, 2 = choisir, 1 long = effacer (clavier), 2 long = valider /
+remonter / sortir.
+
+Pour verifier ce que la carte a *compris* (et pas ce qu'on croit avoir
+appuye) : `GET /state` donne `boutons` = compteurs b1/b2 court/long/double
+depuis le demarrage, plus les seuils.
+
+## Accueil : le prochain rendez-vous a une place fixe
+
+La bande du bas (sous la ligne y=112) est reservee au rendez-vous :
+libelle (`PROCHAIN RDV`, ou `DANS n MIN` a moins de 90 min), puis
+`JEU 16:30` en corps 3, puis le titre en petit. Le nom de la borne wifi a
+ete retire de l'accueil (il reste dans les reglages et dans `/state`) pour
+laisser la place. Le compagnon marche sous la ligne y=168, rayon 8.
+
 ## Les pages : accueil, systeme, reglages
 
 Trois pages : `PAGE_MAITRE` (0), `PAGE_SYS` (1), `PAGE_REG` (2).

@@ -280,6 +280,7 @@ static char  wifi_actif[33] = "";   /* borne sur laquelle on est connecte */
 static char  ms_heure[6] = "";
 static char  ms_titre[64] = "";
 static int   ms_dans = -1;          /* minutes avant le debut, -1 = rien */
+static long  ms_debut = 0;          /* instant du debut (epoch), 0 = rien */
 static void ical_charge(void);
 static int http_get(const char *url, const char *ua, uint8_t *buf, int cap);
 static void ms_boucle(void);
@@ -951,7 +952,7 @@ static void infos_nettoie(char *s)
 /* un pas vers la destination ; arrive, il en choisit une autre au hasard */
 static void kirby_promene(void)
 {
-    int x0 = 26, x1 = 174, y0 = 142, y1 = 156;   /* la zone blanche sous la meteo */
+    int x0 = 22, x1 = 178, y0 = 176, y1 = 187;   /* la bande du bas, sous le rendez-vous */
     if ((kirby_vx == 0 && kirby_vy == 0) || (kirby_x == kirby_vx && kirby_y == kirby_vy)) {
         kirby_vx = x0 + (int)(esp_random() % (uint32_t)(x1 - x0 + 1));
         kirby_vy = y0 + (int)(esp_random() % (uint32_t)(y1 - y0 + 1));
@@ -1089,6 +1090,48 @@ static const char *JOURS_SEM[] = {"DIMANCHE", "LUNDI", "MARDI", "MERCREDI", "JEU
                                   "VENDREDI", "SAMEDI"};
 static const char *MOIS_AN[] = {"JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN",
                                 "JUILLET", "AOUT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE"};
+static const char *JOURS_COURT[] = {"DIM", "LUN", "MAR", "MER", "JEU", "VEN", "SAM"};
+
+/* minuit local d'un instant, pour compter les jours sans se tromper d'heure */
+static time_t minuit_local(time_t t)
+{
+    struct tm x;
+    localtime_r(&t, &x);
+    x.tm_hour = 0; x.tm_min = 0; x.tm_sec = 0; x.tm_isdst = -1;
+    return mktime(&x);
+}
+
+/* ------ prochain rendez-vous : une bande fixe, toujours au meme endroit ------ */
+static void dessine_rdv(void)
+{
+    bool dispo = (ms_debut > 0 && ms_titre[0]);
+    char quand[40] = "";
+    if (dispo) {
+        time_t ts = (time_t)ms_debut;
+        struct tm te;
+        localtime_r(&ts, &te);
+        long jours = (long)((minuit_local(ts) - minuit_local(time(NULL)) + 3600) / 86400);
+        if (jours <= 0)      snprintf(quand, sizeof(quand), "AUJ. %s", ms_heure);
+        else if (jours == 1) snprintf(quand, sizeof(quand), "DEMAIN %s", ms_heure);
+        else                 snprintf(quand, sizeof(quand), "%s %s",
+                                      JOURS_COURT[te.tm_wday % 7], ms_heure);
+    }
+    if (dispo && ms_dans >= 0 && ms_dans <= 90) {
+        char lab[24];
+        snprintf(lab, sizeof(lab), "DANS %d MIN", ms_dans);
+        a_text_c(100, 118, 1, lab);
+    } else {
+        a_text_c(100, 118, 1, "PROCHAIN RDV");
+    }
+    if (dispo) {
+        char titre[72];
+        snprintf(titre, sizeof(titre), "%.47s", ms_titre);
+        a_text_c(100, 127, 3, quand);
+        a_text_c(100, 148, 1, titre);
+    } else {
+        a_text_c(100, 130, 2, "AUCUN");
+    }
+}
 
 
 /* ================================================================== */
@@ -1140,61 +1183,54 @@ static void draw_app_maitre(void)
 
     /* l'heure, en tres gros, et l'etat du wifi */
     snprintf(b, sizeof(b), "%02d:%02d", ti.tm_hour, ti.tm_min);
-    a_text_c(100, 6, 7, b);
+    a_text_c(100, 4, 7, b);
     icon_wifi(183, 12, ui_wifi_ok ? 1 : 0);
 
-    /* la borne wifi utilisee, en corps 2 : lisible a bout de bras */
-    if (wifi_actif[0])
-        a_text_c(100, 44, 2, wifi_actif);
-
+    /* la date, en corps 2 (le nom de la borne wifi vit dans les reglages) */
     snprintf(b, sizeof(b), "%s %d %s", JOURS_SEM[ti.tm_wday % 7], ti.tm_mday,
              MOIS_AN[ti.tm_mon % 12]);
-    a_text_c(100, 58, 1, b);
-    a_hline(6, 193, 68, 1);
+    a_text_c(100, 44, 2, b);
+    a_hline(6, 193, 60, 1);
 
     if (voix_etat != 0) {
         /* Laura est la : son compagnon passe au premier plan, en grand, et sa
            bouche suit les syllabes quand elle parle. */
-        a_text(8, 76, 1, "LAURA");
+        a_text(8, 70, 1, "LAURA");
         int d = (esp_timer_get_time() / 1000) % 1600 < 800;
         if (d) { for (int dx = 0; dx < 3; dx++) for (int dy = 0; dy < 3; dy++)
-                     px(192 + dx, 76 + dy, 1); }
+                     px(192 + dx, 70 + dy, 1); }
         /* pas d'animation possible sur cette dalle : une image fixe par etat */
-        draw_kirby(100, 126, 40, anim_ph, 0,
+        draw_kirby(100, 116, 36, anim_ph, 0,
                    voix_etat == 3 ? 0.55f : 0.0f);
-        a_text_c(100, 176, 2, voix_etat == 1 ? "ECOUTE" :
+        a_text_c(100, 166, 3, voix_etat == 1 ? "ECOUTE" :
                              voix_etat == 2 ? "REFLEXION" : "JE PARLE");
-        a_hline(6, 193, 188, 1);
         return;
     }
 
     /* la meteo du jour */
-    ic_temp(22, 82);
+    ic_temp(20, 74);
     if (meteo_ok) {
         snprintf(b, sizeof(b), "%.1f", (double)meteo_temp);
-        a_text(38, 76, 3, b);
-        a_text(38 + a_text_w(3, b) + 4, 76, 3, "C");
+        a_text(34, 66, 3, b);
+        a_text(34 + a_text_w(3, b) + 4, 66, 3, "C");
     } else {
-        a_text(38, 76, 3, "--");
+        a_text(34, 66, 3, "--");
     }
     /* ce qu'il consomme, aligne a droite de la temperature */
     snprintf(b, sizeof(b), "%.1f W", conso_mw() / 1000.0);
-    a_text(196 - a_text_w(2, b), 80, 2, b);
+    a_text(196 - a_text_w(1, b), 68, 1, b);
 
-    a_text_c(100, 100, 2, meteo_texte(meteo_code));
-    a_text_c(100, 116, 1, METEO_VILLE);
+    a_text_c(100, 88, 2, meteo_texte(meteo_code));
+    a_text_c(100, 102, 1, METEO_VILLE);
+    a_hline(6, 193, 112, 1);
 
-    /* la prochaine reunion, si elle est proche */
-    if (ms_dans >= 0 && ms_dans <= 90 && ms_heure[0]) {
-        char ev[112];
-        snprintf(ev, sizeof(ev), "%s %s", ms_heure, ms_titre);
-        a_text_c(100, 176, 2, ev);
-    }
+    /* ------ prochain rendez-vous : toujours au meme endroit ------ */
+    dessine_rdv();
 
-    /* le petit compagnon se promene dans la zone blanche (tache promenade) */
-    draw_kirby(kirby_x, kirby_y, 15, anim_ph, kirby_etat());
+    /* le petit compagnon se promene dans la bande du bas (tache promenade) */
+    draw_kirby(kirby_x, kirby_y, 8, anim_ph, kirby_etat());
 
-    a_hline(6, 193, 188, 1);
+    a_hline(6, 193, 196, 1);
 }
 
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */
@@ -2216,12 +2252,12 @@ static void draw_app_reglages(void)
             }
         }
         a_hline(4, 195, 128, 1);
-        a_text_c(100, 136, 2, "1:SUIVANT 2:CHOISIR");
-        a_text_c(100, 152, 1, "appui long 2 : quitter");
-        snprintf(b, sizeof(b), "http://%s", ip_courante());
-        a_text_c(100, 164, 2, b);
-        a_text_c(100, 178, 2, "/reglages");
-        a_text_c(100, 192, 1, "en http, pas https");
+        a_text_c(100, 134, 2, "1 = SUIVANT");
+        a_text_c(100, 150, 2, "2 = CHOISIR");
+        a_text_c(100, 166, 2, "2 LONG = SORTIR");
+        snprintf(b, sizeof(b), "http://%s/reglages", ip_courante());
+        a_text_c(100, 182, 1, b);
+        a_text_c(100, 191, 1, "en http, pas https");
         return;
     }
 
@@ -2896,16 +2932,43 @@ static void bouton_long(int n, int tres_long)
 {
     (void)tres_long;
     if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
-    if (n == 0) assistant_wake();         /* appui long : je t'ecoute */
+    if (n == 0) assistant_wake();         /* appui long 1 : je t'ecoute */
+    else {
+        /* appui long 2 : retour a l'accueil et arret de ce qui tourne.
+           Avant, il ne faisait rien du tout : on croyait le bouton casse. */
+        tache_arrete();
+        ui_page = PAGE_MAITRE;
+    }
     show_ui();
 }
 
 static volatile bool g_sim_court[2] = {false, false};
 static volatile bool g_sim_long[2]  = {false, false};
 static volatile bool g_sim_double[2] = {false, false};
+/* compteurs d'appuis : /state les donne, pour verifier ce que la carte a
+   vraiment compris (et pas ce qu'on croit avoir appuye) */
+static volatile int  g_btn_court[2]  = {0, 0};
+static volatile int  g_btn_long[2]   = {0, 0};
+static volatile int  g_btn_double[2] = {0, 0};
 static void bouton_court(int n);
 static void bouton_long(int n, int tres_long);
 static void bouton_double(int n);
+
+/* ce que les boutons ont reellement recu depuis le demarrage */
+static cJSON *btn_etat_json(void)
+{
+    cJSON *o = cJSON_CreateObject();
+    if (!o) return NULL;
+    cJSON_AddNumberToObject(o, "b1_court",  g_btn_court[0]);
+    cJSON_AddNumberToObject(o, "b1_long",   g_btn_long[0]);
+    cJSON_AddNumberToObject(o, "b1_double", g_btn_double[0]);
+    cJSON_AddNumberToObject(o, "b2_court",  g_btn_court[1]);
+    cJSON_AddNumberToObject(o, "b2_long",   g_btn_long[1]);
+    cJSON_AddNumberToObject(o, "b2_double", g_btn_double[1]);
+    cJSON_AddNumberToObject(o, "seuil_long_ms", 600);
+    cJSON_AddNumberToObject(o, "fenetre_double_ms", 320);
+    return o;
+}
 
 static void button_task(void *arg)
 {
@@ -2914,57 +2977,83 @@ static void button_task(void *arg)
     io.mode = GPIO_MODE_INPUT;
     io.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io);
-    int last0 = 1, last18 = 1;
-    int64_t dernier_court[2] = {0, 0};
+
+    const gpio_num_t pins[2] = {GPIO_NUM_0, GPIO_NUM_18};   /* 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
+    const int64_t ANTI_REBOND = 40000;    /* 40 ms : plus court, c'est du bruit */
+    const int64_t LONG_MS     = 600000;   /* 600 ms : appui long, decide PENDANT l'appui */
+    const int64_t DOUBLE_MS   = 320000;   /* 320 ms pour enchaîner un double appui */
+    int     last[2] = {1, 1};
+    int64_t t0[2] = {0, 0};
+    bool    long_envoye[2] = {false, false};
+    int64_t court_attente[2] = {0, 0};    /* appui simple retenu le temps de voir un double */
+
     for (;;) {
         /* appuis simules par /bouton (verification a distance) */
-        if (g_sim_court[0]) { g_sim_court[0] = false; bouton_court(0); }
-        if (g_sim_court[1]) { g_sim_court[1] = false; bouton_court(1); }
-        if (g_sim_long[0])  { g_sim_long[0]  = false; bouton_long(0, 0); }
-        if (g_sim_long[1])  { g_sim_long[1]  = false; bouton_long(1, 0); }
-        if (g_sim_double[0]) { g_sim_double[0] = false; bouton_double(0); }
-        if (g_sim_double[1]) { g_sim_double[1] = false; bouton_double(1); }
+        if (g_sim_court[0]) { g_sim_court[0] = false; g_btn_court[0]++;  bouton_court(0); }
+        if (g_sim_court[1]) { g_sim_court[1] = false; g_btn_court[1]++;  bouton_court(1); }
+        if (g_sim_long[0])  { g_sim_long[0]  = false; g_btn_long[0]++;   bouton_long(0, 0); }
+        if (g_sim_long[1])  { g_sim_long[1]  = false; g_btn_long[1]++;   bouton_long(1, 0); }
+        if (g_sim_double[0]) { g_sim_double[0] = false; g_btn_double[0]++; bouton_double(0); }
+        if (g_sim_double[1]) { g_sim_double[1] = false; g_btn_double[1]++; bouton_double(1); }
 
-        int b0 = gpio_get_level(GPIO_NUM_0);
-        int b18 = gpio_get_level(GPIO_NUM_18);
-        if (last0 == 1 && b0 == 0) {                       /* BOUTON 0 (BOOT) */
-            int held = 0;
-            while (gpio_get_level(GPIO_NUM_0) == 0 && held < 50) {
-                vTaskDelay(pdMS_TO_TICKS(60));
-                held++;
+        int64_t now = esp_timer_get_time();
+        for (int i = 0; i < 2; i++) {
+            int  niveau  = gpio_get_level(pins[i]);
+            bool enfonce = (niveau == 0);
+            bool avant   = (last[i] == 0);
+
+            if (enfonce && !avant) {                 /* debut d'appui */
+                t0[i] = now;
+                long_envoye[i] = false;
+                if (court_attente[i]) {              /* 2e appui rapide : c'est un double */
+                    court_attente[i] = 0;
+                    g_btn_double[i]++;
+                    bouton_double(i);
+                }
+            } else if (enfonce && !long_envoye[i] && now - t0[i] >= LONG_MS) {
+                /* l'appui long part a 600 ms, sans attendre le relachement */
+                long_envoye[i] = true;
+                court_attente[i] = 0;
+                g_btn_long[i]++;
+                bouton_long(i, (now - t0[i]) >= 2400000);
+            } else if (!enfonce && avant) {          /* relachement */
+                if (!long_envoye[i] && now - t0[i] >= ANTI_REBOND) {
+                    /* au clavier seulement, on retient l'appui simple 320 ms :
+                       sinon un double appui faisait "touche + saut de 6" */
+                    bool clavier = (ui_page == PAGE_REG && reg_vue == REG_CLAVIER);
+                    if (clavier) {
+                        if (court_attente[i]) {
+                            court_attente[i] = 0;
+                            g_btn_double[i]++;
+                            bouton_double(i);
+                        } else {
+                            court_attente[i] = now;
+                        }
+                    } else {
+                        g_btn_court[i]++;
+                        bouton_court(i);
+                    }
+                }
             }
-            if (held >= 10) bouton_long(0, held >= 40);      /* 600 ms : au-dela c'est long */
-            else if (held >= 1) {
-                int64_t now = esp_timer_get_time();
-                if (now - dernier_court[0] < 400000) bouton_double(0);
-                else                                 bouton_court(0);
-                dernier_court[0] = now;
-            }
+            last[i] = niveau;
         }
-        if (last18 == 1 && b18 == 0) {                     /* BOUTON 18 (PWR) */
-            int held = 0;
-            while (gpio_get_level(GPIO_NUM_18) == 0 && held < 30) {
-                vTaskDelay(pdMS_TO_TICKS(60));
-                held++;
-            }
-            if (held >= 10) bouton_long(1, 0);               /* 600 ms */
-            else if (held >= 1) {
-                int64_t now = esp_timer_get_time();
-                if (now - dernier_court[1] < 400000) bouton_double(1);
-                else                                 bouton_court(1);
-                dernier_court[1] = now;
+        /* l'appui simple retenu est confirme quand le delai de double est passe */
+        for (int i = 0; i < 2; i++) {
+            if (court_attente[i] && now - court_attente[i] >= DOUBLE_MS) {
+                court_attente[i] = 0;
+                g_btn_court[i]++;
+                bouton_court(i);
             }
         }
         /* sonnerie : n'importe quel appui l'arrete */
-        if (timer_mode == 0 && timers[timer_sel].sonne && (b0 == 0 || b18 == 0)) {
+        if (timer_mode == 0 && timers[timer_sel].sonne && (last[0] == 0 || last[1] == 0)) {
             timers[timer_sel].sonne = false;
             timers[timer_sel].fin_s = 0;
             radio_stop();
             timers_sauve();
             show_ui();
         }
-        last0 = b0; last18 = b18;
-        vTaskDelay(pdMS_TO_TICKS(40));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -4460,7 +4549,7 @@ static void ms_interroge(void)
         free(rep);
         return;
     }
-    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0;
+    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0; ms_debut = 0;
     cJSON *j = cJSON_Parse(rep);
     cJSON *v = j ? cJSON_GetObjectItem(j, "value") : NULL;
     int n = cJSON_IsArray(v) ? cJSON_GetArraySize(v) : 0;
@@ -4478,6 +4567,7 @@ static void ms_interroge(void)
         snprintf(ms_heure, sizeof(ms_heure), "%02d:%02d", e.tm_hour, e.tm_min);
         snprintf(ms_titre, sizeof(ms_titre), "%s", cJSON_IsString(suj) ? suj->valuestring : "reunion");
         ms_dans = (int)((-delta) / 60);
+        ms_debut = t;
         break;
     }
     if (j) cJSON_Delete(j);
@@ -4672,7 +4762,7 @@ static void ical_interroge(void)
     }
     free(buf);
 
-    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0;
+    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0; ms_debut = 0;
     if (meilleur > 0) {
         struct tm e;
         time_t tt = (time_t)meilleur;
@@ -4680,6 +4770,7 @@ static void ical_interroge(void)
         snprintf(ms_heure, sizeof(ms_heure), "%02d:%02d", e.tm_hour, e.tm_min);
         snprintf(ms_titre, sizeof(ms_titre), "%s", meilleur_titre);
         ms_dans = (int)((meilleur - now) / 60);
+        ms_debut = meilleur;
         if (ms_dans < 0) ms_dans = 0;
     }
     ESP_LOGI(TAG, "ical : prochain '%s' a %s dans %d min", ms_titre, ms_heure, ms_dans);
@@ -4818,7 +4909,7 @@ static esp_err_t h_ical(httpd_req_t *req)
             nvs_commit(nh);
             nvs_close(nh);
         }
-        ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0;
+        ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0; ms_debut = 0;
         httpd_resp_sendstr(req, "{\"ok\":true,\"configure\":false}");
         return ESP_OK;
     }
@@ -7652,6 +7743,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddBoolToObject(r, "cal_ical", ical_url[0] != 0);
     cJSON_AddStringToObject(r, "cal_heure", ms_heure);
     cJSON_AddNumberToObject(r, "cal_dans", ms_dans);
+    cJSON_AddItemToObject(r, "boutons", btn_etat_json());
     cJSON_AddBoolToObject(r, "wifi_enregistre", wifi_rt ? 1 : 0);
     cJSON_AddNumberToObject(r, "heap_dma_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "heap_interne_max",
