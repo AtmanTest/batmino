@@ -2098,6 +2098,7 @@ static void sys_ko(char *b, size_t n, uint32_t ko)
 /* acces au wifi et au scan, definis plus bas (section WiFi) */
 static const char *wifi_ssid_i(int i);
 static void wifi_secours(void);
+static void wifi_retour_principal(void);
 static bool reg_valide(void);
 static void reg_scan_lance(void);
 static bool reg_scan_encours(void);
@@ -3135,6 +3136,7 @@ static void ui_task(void *arg)
         /* page SYSTEM : mesure chaque seconde, mais une image toutes les 5 s
            (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
         wifi_secours();
+        wifi_retour_principal();
         if (ui_page == PAGE_SYS) sys_page_entre();
         else                     sys_page_sort();
         if (ui_page == PAGE_SYS) sys_echantillon();
@@ -3366,9 +3368,12 @@ static EventGroupHandle_t wifi_eg;
 #define WIFI_OK_BIT BIT0
 static int retry_count = 0;
 
+/* on ne garde que les SSID non vides : un secours qui n'existe pas fait perdre
+   quatre tentatives a chaque cycle pour rien */
 static const char *WIFI_TRIES[] = { WIFI_SSID, WIFI_SSID_ALT, WIFI_SSID_ALT2 };
+static int wifi_n = 1;      /* nombre de SSID non vides (calcule au demarrage) */
 static int wifi_try = 0;
-#define WIFI_NTRIES (sizeof(WIFI_TRIES) / sizeof(WIFI_TRIES[0]))
+#define WIFI_NTRIES_ARRAY ((int)(sizeof(WIFI_TRIES) / sizeof(WIFI_TRIES[0])))
 
 static char wifi_ssid_rt[33] = "";
 static char wifi_pass_rt[65] = "";
@@ -3383,7 +3388,7 @@ static const char *wifi_ssid_i(int i)
 static const char *wifi_pass_i(int i)
 {
     if (i == 0 && wifi_rt) return wifi_pass_rt;
-    return WIFI_PASS;
+    return (i == 1) ? WIFI_PASS_ALT : WIFI_PASS;   /* chaque borne a sa cle */
 }
 
 static esp_err_t wifi_set_ssid(int i)
@@ -3425,6 +3430,25 @@ static void wifi_reglages_charge(void)
 /* Filet de securite : si le reseau enregistre ne repond pas au bout de 3 min,
    on l'oublie et on repart sur les reseaux compiles. Sans ca, une faute de
    frappe dans le mot de passe coupe le robot du monde (vecu). */
+/* Si on tourne sur un secours, on retente le principal toutes les 10 min.
+   Sinon le robot reste colle a la borne de secours (dont le LAN isole ses
+   clients) meme quand la borne principale est revenue. */
+static void wifi_retour_principal(void)
+{
+    static int64_t t = 0;
+    if (wifi_rt || wifi_try == 0 || !(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) { t = 0; return; }
+    int64_t now = esp_timer_get_time();
+    if (!t) { t = now; return; }
+    if (now - t < 600LL * 1000000) return;
+    t = 0;
+    ESP_LOGI(TAG, "wifi : on retente le reseau principal (%s)", WIFI_TRIES[0]);
+    wifi_try = 0;
+    retry_count = 0;
+    esp_wifi_disconnect();
+    wifi_set_ssid(0);
+    esp_wifi_connect();
+}
+
 static void wifi_secours(void)
 {
     static int64_t t0 = 0;
@@ -3670,7 +3694,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
             esp_wifi_connect();
         } else {
             retry_count = 0;
-            wifi_try = (wifi_try + 1) % WIFI_NTRIES;
+            wifi_try = (wifi_try + 1) % (wifi_n > 0 ? wifi_n : 1);
             wifi_set_ssid(wifi_try);
             esp_wifi_connect();
         }
@@ -3685,6 +3709,11 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
 static void wifi_start(void)
 {
     wifi_reglages_charge();
+    wifi_n = 0;
+    for (int i = 0; i < WIFI_NTRIES_ARRAY; i++)
+        if (WIFI_TRIES[i] && WIFI_TRIES[i][0]) wifi_n++;
+    if (!wifi_n) wifi_n = 1;
+    ESP_LOGI(TAG, "wifi : %d reseau(x) configure(s)", wifi_n);
     wifi_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());

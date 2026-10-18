@@ -264,6 +264,28 @@ Effet de bord : `erase-flash` vide la NVS, donc la cle d'API et le SSID
 enregistre reviennent aux valeurs compilees dans `secrets.h`. C'est sans danger,
 mais a savoir avant de le faire.
 
+### Les reseaux de secours
+
+`secrets.h` contient maintenant deux secours et chacun sa cle :
+
+    WIFI_SSID      "MON_RESEAU_SECOURS"     WIFI_PASS      "lavieestbellE$1"
+    WIFI_SSID_ALT  "caca"               WIFI_PASS_ALT  "goodlife"
+    WIFI_SSID_ALT2 "MON_RESEAU_SECOURS_2"
+
+- Le SSID `GL-MT3000-633-5G` est en **5 GHz : l'ESP32-S3 ne le voit pas**. Son
+  equivalent 2,4 GHz est `caca` (meme routeur, autre LAN : 192.168.1.x).
+- `caca` **isole ses clients** : le robot y prend une adresse (192.168.1.208
+  verifie) et garde internet, mais on ne peut pas le joindre depuis un autre
+  poste du meme reseau. C'est un secours pour rester vivant, pas pour l'admin.
+- Les SSID vides dans `WIFI_TRIES` sont ignores (`wifi_n`).
+- **Retour automatique** : quand il tourne sur un secours, toutes les 10 min il
+  retente le principal. Sinon il resterait colle a la borne de secours meme
+  apres le retour de la principale.
+
+Exercice de bascule (verifie) : `tools/test_secours.py` envoie un SSID bidon au
+robot et lit le port serie. Resultat mesure : ~10 s pour abandonner le faux
+SSID, ~25 s pour etre connecte sur `caca`.
+
 ### Se debloquer sans cable reseau
 
 Le robot n'a pas d'ecran de secours : une faute de frappe dans le mot de passe
