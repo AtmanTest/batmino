@@ -2097,11 +2097,13 @@ static void sys_ko(char *b, size_t n, uint32_t ko)
 
 /* acces au wifi et au scan, definis plus bas (section WiFi) */
 static const char *wifi_ssid_i(int i);
+static bool reg_valide(void);
 static void reg_scan_lance(void);
 static bool reg_scan_encours(void);
 static int  reg_scan_n(void);
 static const char *reg_scan_ssid(int i);
 static int  reg_scan_rssi(int i);
+static int  reg_scan_auth(int i);
 
 /* ------------------------------------------------------------------ */
 /* Page REGLAGES : wifi (liste + clavier), ecran, infos                */
@@ -2113,7 +2115,8 @@ static int  reg_scan_rssi(int i);
 static int reg_vue = REG_MENU;
 static int reg_ligne = 0;
 static int reg_sel = 0;
-static int reg_page_k = 0;
+static int  reg_page_k = 0;
+static uint8_t reg_auth = 0;        /* 0 = reseau ouvert, sinon il faut un mot de passe */
 static char reg_ssid[33] = "";
 static char reg_pass[65] = "";
 static int  reg_cadence = 5;      /* secondes entre deux images (page systeme) */
@@ -2225,6 +2228,7 @@ static void draw_app_reglages(void)
 
     /* --- clavier --- */
     a_text(4, 2, 2, reg_ssid[0] ? reg_ssid : "reseau");
+    if (!reg_valide()) a_text(194 - a_text_w(1, "MDP REQUIS"), 14, 1, "MDP REQUIS");
     /* le mot de passe en clair : il est seul devant son robot */
     {
         char p[24];
@@ -3499,13 +3503,14 @@ static bool reg_scan_encours(void) { return g_wscan_encours || g_wscan_demande; 
 static int reg_scan_n(void) { return g_wscan_n; }
 static const char *reg_scan_ssid(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].ssid : ""; }
 static int reg_scan_rssi(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].rssi : 0; }
+static int reg_scan_auth(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].auth : 0; }
 
 /* ---- boutons de la page REGLAGES ---- */
 static void reg_clavier_touche(void)
 {
     const char *t = reg_touche(reg_sel);
     if (!strcmp(t, "OK")) {
-        if (reg_ssid[0]) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
+        if (reg_valide()) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
         return;
     }
     if (!strcmp(t, "EFF")) {
@@ -3518,6 +3523,13 @@ static void reg_clavier_touche(void)
     if (!strcmp(t, "ESP")) t = " ";
     size_t n = strlen(reg_pass);
     if (n < sizeof(reg_pass) - 1) { reg_pass[n] = t[0]; reg_pass[n + 1] = 0; }
+}
+
+static bool reg_valide(void)
+{
+    if (!reg_ssid[0]) return false;
+    if (reg_auth != 0 && !reg_pass[0]) return false;   /* reseau ferme sans mot de passe */
+    return true;
 }
 
 static void reg_bouton(int n)
@@ -3546,6 +3558,7 @@ static void reg_bouton(int n)
         } else {
             if (!reg_scan_n()) { g_wscan_demande = true; return; }
             snprintf(reg_ssid, sizeof(reg_ssid), "%s", g_wscan[reg_sel].ssid);
+            reg_auth = (uint8_t)g_wscan[reg_sel].auth;
             reg_pass[0] = 0;
             reg_page_k = 0;
             reg_sel = 0;
@@ -3569,7 +3582,7 @@ static void reg_bouton_long(int n)
     }
     /* bouton 2 long : valider au clavier, sinon remonter d'un cran */
     if (reg_vue == REG_CLAVIER) {
-        if (reg_ssid[0]) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
+        if (reg_valide()) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
     } else if (reg_vue == REG_WIFI) {
         reg_vue = REG_MENU;
     }
@@ -6796,6 +6809,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "historique_tours", (double)hist.n);
     cJSON_AddNumberToObject(r, "heap_interne_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(r, "heap_dma", (double)heap_caps_get_free_size(MALLOC_CAP_DMA));
+    cJSON_AddNumberToObject(r, "reset", (double)esp_reset_reason());
     cJSON_AddNumberToObject(r, "heap_dma_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "heap_interne_max",
                             (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
