@@ -62,6 +62,13 @@ Chaque attente BUSY > 300 ms est journalisee : c'est la mesure de reference
 - **`max_uri_handlers`** : a 28, `httpd_register_uri_handler` refusait les
   derniers URI en silence (`no slots left`), donc /bande et /ecran n'existaient
   pas. Mis a 40.
+- **Une tache qui termine par `vTaskDelete(NULL)` ne doit JAMAIS etre appelee
+  comme une fonction.** `tts_lot_tache()` etait appelee directement pour le
+  premier morceau : la tache httpd se suicidait sans repondre, le socket
+  restait ouvert et, avec `max_open_sockets = 2`, toute l'API devenait muette
+  apres deux appels (symptome : `/tts` et `/dit` sans reponse, puis `/state`
+  aussi). Separer `tts_lot_charge()` (le travail) de `tts_lot_tache()` (tache +
+  suicide).
 - **Firmware et bench compiles en Debug (`-Og`) par defaut** : `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y`. Pour mesurer du materiel, passer en `CONFIG_COMPILER_OPTIMIZATION_PERF=y` ; c'est aussi le premier levier de perf reel sur mino-fw (pas encore applique la).
 - `fsync(fileno(f))` existe (VFS ESP-IDF, via `unistd.h`) ; `f_sync()` attend un `FIL*` (FATFS brut), pas un `FILE*`.
 - `build/` herite d'un build interrompu = `objdump: returned non-zero exit status 1` sur une lib : `rm -rf build` puis rebuild.
