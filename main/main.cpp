@@ -1129,17 +1129,17 @@ static void draw_app_maitre(void)
 
     /* l'heure, en tres gros, et l'etat du wifi */
     snprintf(b, sizeof(b), "%02d:%02d", ti.tm_hour, ti.tm_min);
-    a_text_c(100, 8, 7, b);
-    icon_wifi(183, 14, ui_wifi_ok ? 1 : 0);
+    a_text_c(100, 6, 7, b);
+    icon_wifi(183, 12, ui_wifi_ok ? 1 : 0);
+
+    /* la borne wifi utilisee, en corps 2 : lisible a bout de bras */
+    if (wifi_actif[0])
+        a_text_c(100, 44, 2, wifi_actif);
 
     snprintf(b, sizeof(b), "%s %d %s", JOURS_SEM[ti.tm_wday % 7], ti.tm_mday,
              MOIS_AN[ti.tm_mon % 12]);
-    a_text_c(100, 52, 1, b);
-
-    /* la borne wifi utilisee, en tout petit sous l'horloge */
-    if (wifi_actif[0])
-        a_text(194 - a_text_w(1, wifi_actif), 46, 1, wifi_actif);
-    a_hline(6, 193, 62, 1);
+    a_text_c(100, 58, 1, b);
+    a_hline(6, 193, 68, 1);
 
     if (voix_etat != 0) {
         /* Laura est la : son compagnon passe au premier plan, en grand, et sa
