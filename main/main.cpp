@@ -2097,6 +2097,7 @@ static void sys_ko(char *b, size_t n, uint32_t ko)
 
 /* acces au wifi et au scan, definis plus bas (section WiFi) */
 static const char *wifi_ssid_i(int i);
+static void wifi_secours(void);
 static bool reg_valide(void);
 static void reg_scan_lance(void);
 static bool reg_scan_encours(void);
@@ -3133,6 +3134,7 @@ static void ui_task(void *arg)
         }
         /* page SYSTEM : mesure chaque seconde, mais une image toutes les 5 s
            (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
+        wifi_secours();
         if (ui_page == PAGE_SYS) sys_page_entre();
         else                     sys_page_sort();
         if (ui_page == PAGE_SYS) sys_echantillon();
@@ -3420,6 +3422,33 @@ static void wifi_reglages_charge(void)
     nvs_close(nh);
 }
 
+/* Filet de securite : si le reseau enregistre ne repond pas au bout de 3 min,
+   on l'oublie et on repart sur les reseaux compiles. Sans ca, une faute de
+   frappe dans le mot de passe coupe le robot du monde (vecu). */
+static void wifi_secours(void)
+{
+    static int64_t t0 = 0;
+    if (!wifi_rt) { t0 = 0; return; }
+    if (xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) { t0 = 0; return; }
+    int64_t now = esp_timer_get_time();
+    if (!t0) { t0 = now; return; }
+    if (now - t0 < 180LL * 1000000) return;
+    ESP_LOGW(TAG, "wifi : '%s' ne repond pas depuis 3 min, retour aux reseaux compiles", wifi_ssid_rt);
+    nvs_handle_t nh;
+    if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+        nvs_erase_key(nh, "ssid");
+        nvs_erase_key(nh, "pass");
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+    wifi_rt = false;
+    t0 = 0;
+    wifi_try = 0;
+    retry_count = 0;
+    wifi_set_ssid(0);
+    esp_wifi_connect();
+}
+
 static void wifi_reglages_sauve(void)
 {
     nvs_handle_t nh;
@@ -3633,6 +3662,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
         ESP_LOGW(TAG, "WiFi deconnecte : raison %d", d ? d->reason : -1);
+        xEventGroupClearBits(wifi_eg, WIFI_OK_BIT);
         if (retry_count < WIFI_MAX_RETRY) {
             retry_count++;
             ESP_LOGW(TAG, "WiFi perdu, tentative %d/%d sur '%s'", retry_count,
@@ -6864,6 +6894,8 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "heap_interne_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(r, "heap_dma", (double)heap_caps_get_free_size(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "reset", (double)esp_reset_reason());
+    cJSON_AddStringToObject(r, "wifi_ssid", wifi_ssid_i(0));
+    cJSON_AddBoolToObject(r, "wifi_enregistre", wifi_rt ? 1 : 0);
     cJSON_AddNumberToObject(r, "heap_dma_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "heap_interne_max",
                             (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
@@ -7030,6 +7062,26 @@ static esp_err_t h_wifi(httpd_req_t *req)
         httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"ssid vide\"}");
         return ESP_OK;
     }
+    /* un WPA2 avec 2 caracteres ne peut pas marcher : on refuse au lieu de
+       laisser le robot se couper du reseau (c'est arrive) */
+    {
+        int auth = -1;
+        for (int i = 0; i < g_wscan_n; i++)
+            if (!strcmp(g_wscan[i].ssid, ssid)) { auth = g_wscan[i].auth; break; }
+        size_t lp = strlen(pass);
+        if (auth == 0 && lp == 0) {
+            /* reseau ouvert : rien a faire */
+        } else if (lp < 8) {
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"mot de passe trop court (8 caracteres mini)\"}");
+            return ESP_OK;
+        }
+        if (strlen(ssid) > 32) {
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"ok\":false,\"err\":\"nom de reseau trop long\"}");
+            return ESP_OK;
+        }
+    }
     wifi_bascule(ssid, pass);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"ok\":true}");
@@ -7066,14 +7118,14 @@ static const char PAGE_REGLAGES[] =
 "d.onclick=()=>{document.getElementById('ssid').value=a.s;"
 "if(a.a){let p=prompt('mot de passe pour '+a.s);if(p===null)return;"
 "fetch('/wifi?ssid='+encodeURIComponent(a.s)+'&pass='+encodeURIComponent(p))"
-".then(x=>x.json()).then(j=>document.getElementById('msg').textContent=j.ok?'connecte, redemarrage du wifi...':'erreur');}"
+".then(x=>x.json()).then(j=>document.getElementById('msg').textContent=j.ok?'connecte, redemarrage du wifi...':'erreur : '+(j.err||'inconnue'));}"
 "else fetch('/wifi?ssid='+encodeURIComponent(a.s)+'&pass=')"
 ".then(()=>document.getElementById('msg').textContent='connecte');};"
 "l.appendChild(d)})}"
 "function envoie(){let s=document.getElementById('ssid').value,"
 "p=document.getElementById('pass').value;"
 "fetch('/wifi?ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(p))"
-".then(x=>x.json()).then(j=>document.getElementById('msg').textContent=j.ok?'enregistre':'erreur')}"
+".then(x=>x.json()).then(j=>document.getElementById('msg').textContent=j.ok?'enregistre, le robot se reconnecte':'erreur : '+(j.err||'inconnue'))}"
 "scan();</script>";
 
 static esp_err_t h_reglages(httpd_req_t *req)
