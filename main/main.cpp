@@ -1255,14 +1255,17 @@ static void draw_app_maitre(void)
 
     /* la meteo du jour, sur une seule ligne : icone, 8.0C, NUAGEUX */
     {
-        char m[64];
-        if (meteo_ok) snprintf(b, sizeof(b), "%.1fC", (double)meteo_temp);
-        else          snprintf(b, sizeof(b), "--");
-        snprintf(m, sizeof(m), "%.12s %s", b, meteo_texte(meteo_code));
-        int w = a_text_w(3, m);
-        int x = 100 - (w + 18) / 2;          /* 12 px d'icone + 6 d'ecart */
+        char t[16], cond[32];
+        if (meteo_ok) snprintf(t, sizeof(t), "%.1fC", (double)meteo_temp);
+        else          snprintf(t, sizeof(t), "--");
+        snprintf(cond, sizeof(cond), "%.20s", meteo_texte(meteo_code));
+        /* la temperature en corps 3, l'etat du ciel en corps 2 : sinon
+           "PEU NUAGEUX" vient manger la place du nom de la borne wifi */
+        int wt = a_text_w(3, t), wc = a_text_w(2, cond);
+        int x = 100 - (18 + wt + 8 + wc) / 2;
         ic_temp(x + 6, 77);
-        a_text(x + 18, 70, 3, m);
+        a_text(x + 18, 70, 3, t);
+        a_text(x + 18 + wt + 8, 75, 2, cond);
     }
     /* la ville en gras a gauche, la borne wifi en petit a droite : deux
        reperes utiles (ou je suis, sur quoi je suis connecte) */
