@@ -292,6 +292,9 @@ static void  ui_chime(void);
 
 /* audio : tampon mono 16 bits en PSRAM et aides, utilisees des le reveil */
 static uint8_t *rec_pcm = NULL;
+static volatile bool alarme_on = false;   /* la sonnerie du rendez-vous tourne */
+static int64_t alarme_t0 = 0;            /* quand elle a commence */
+static int     alarme_jouee = 0;         /* nombre de sonneries reellement jouees */
 static int  rec_last_bytes = 0;
 static volatile bool radio_mode = false;      /* le PC pousse un flux PCM sur l'USB */
 static volatile bool pcm_xfer = false;        /* transfert PCM en cours : pas d'echo */
@@ -1264,7 +1267,9 @@ static void draw_app_maitre(void)
     /* la ville en gras a gauche, la borne wifi en petit a droite : deux
        reperes utiles (ou je suis, sur quoi je suis connecte) */
     a_text_gras(8, 87, 2, METEO_VILLE);
-    if (wifi_actif[0])
+    if (alarme_on)
+        a_text_gras(192 - a_text_w(2, "1 = STOP"), 86, 2, "1 = STOP");
+    else if (wifi_actif[0])
         a_text(192 - a_text_w(2, wifi_actif), 86, 2, wifi_actif);
 
     /* ------ prochain rendez-vous, dans un cadre fin ------ */
@@ -2940,6 +2945,13 @@ static void reg_bouton_long(int n);
 
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
+    /* la sonnerie passe avant tout : le bouton 1 la fait taire */
+    if (alarme_on && n == 0) {
+        alarme_on = false;
+        ESP_LOGI(TAG, "alarme : coupee au bouton 1");
+        show_ui();
+        return;
+    }
     if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
     if (n == 0) {
         assistant_wake();                 /* bouton 1 : la conversation, depuis n'importe ou */
@@ -3105,6 +3117,26 @@ static void button_task(void *arg)
 /* /bouton?n=0&m=court  -> simule un appui (verification a distance)
    /bouton?n=1&m=long   -> appui long
    /bouton?p=2          -> force la page 2 (0..3)                     */
+/* /alarme?t=1 declenche la sonnerie tout de suite (pour l'ecouter sans
+   attendre un rendez-vous) ; sans parametre, elle s'arrete */
+static esp_err_t h_alarme(httpd_req_t *req)
+{
+    char v[16] = "";
+    bool go = (qval(req, "t", v, sizeof(v)) == ESP_OK && v[0] == '1');
+    if (go) {
+        alarme_t0 = esp_timer_get_time();
+        alarme_on = true;
+        ESP_LOGI(TAG, "alarme : essai demande");
+    } else {
+        alarme_on = false;
+    }
+    show_ui();
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddBoolToObject(r, "alarme", alarme_on);
+    cJSON_AddNumberToObject(r, "jouee", alarme_jouee);
+    return send_json(req, r);
+}
+
 static esp_err_t h_bouton(httpd_req_t *req)
 {
     char v[16] = "";
@@ -4454,6 +4486,10 @@ static char   *ms_at = NULL;          /* access token (PSRAM) */
 static int64_t ms_at_exp = 0;         /* expiration, en microsecondes */
 static int64_t ms_prochain = 0;       /* prochaine interrogation */
 static bool    ms_annonce = false;    /* deja dit a voix haute */
+/* la sonnerie du rendez-vous : 30 min avant, elle tourne tant qu'on n'a pas
+   appuye sur le bouton 1 (ou au bout de 5 min, pour ne pas sonner dans le vide) */
+#define ALARME_MIN  30
+static bool    ms_alarme = false;
 
 static bool ms_lit_rt(void)
 {
@@ -4990,20 +5026,23 @@ static void ms_boucle(void)
         if (dernier && now - dernier < 60LL * 1000000) return;   /* une passe par minute */
         dernier = now;
     }
+    /* la sonnerie se verifie a chaque passe (une par minute) et non seulement
+       quand le calendrier est relu : sinon elle pouvait partir 5 min trop tard */
+    if (ms_dans >= 0 && ms_dans <= ALARME_MIN && !ms_alarme && ms_debut > 0) {
+        ms_alarme = true;
+        alarme_t0 = esp_timer_get_time();
+        alarme_on = true;
+        show_ui();
+        ESP_LOGI(TAG, "alarme : rendez-vous dans %d min (%s)", ms_dans,
+                 ms_org[0] ? ms_org : ms_titre);
+    }
+    /* on rearme des que le rendez-vous sort de la fenetre, sinon la sonnerie
+       reste bloquee apres la premiere reunion (ms_dans vaut -1) */
+    if (ms_dans < 0 || ms_dans > ALARME_MIN) ms_alarme = false;
+
     if (ms_prochain && now < ms_prochain) return;
     ms_prochain = now + 300LL * 1000000;                     /* toutes les 5 min */
     if (cal_tache_h && !cal_occupe) xTaskNotifyGive(cal_tache_h);
-    /* l'annonce : une fois, quand il reste moins d'un quart d'heure */
-    if (ms_dans >= 0 && ms_dans <= 15 && !ms_annonce) {
-        ms_annonce = true;
-        char phrase[128];
-        snprintf(phrase, sizeof(phrase), "Dans %d minutes, rendez-vous avec %s.",
-                 ms_dans, ms_org[0] ? ms_org : ms_titre);
-        voix_dit(phrase);
-    }
-    /* on rearme des que le rendez-vous sort de la fenetre, sinon l'annonce
-       reste bloquee apres la premiere reunion (ms_dans vaut -1) */
-    if (ms_dans < 0 || ms_dans > 15) ms_annonce = false;
 }
 
 /* Enregistre un jeton de rafraichissement Microsoft (POST, corps = jeton).
@@ -6871,6 +6910,80 @@ static void bip_doux(float hz, int ms, float amp)
     audio_play_mono(n);
 }
 
+/* ---- la sonnerie du rendez-vous ----
+   Un carillon, pas un reveil : accord majeur (mi - sol# - si) joue en
+   arpege, avec de l'octave et une pointe de quinte dans le timbre, et une
+   deuxieme phrase plus douce. Chaque note a une attaque courte et une
+   extinction naturelle, sinon le haut-parleur claque et le son agresse. */
+static int sonnerie_compose(void)
+{
+    if (!rec_pcm) return 0;
+    const int sr = 16000;
+    const float PI = 3.14159265f;
+    static const struct { float f; int ms; int t0; float a; } notes[] = {
+        {659.25f, 300,    0, 0.50f},      /* mi  */
+        {830.61f, 300,  320, 0.46f},      /* sol# */
+        {987.77f, 520,  640, 0.42f},      /* si  */
+        {987.77f, 240, 1240, 0.22f},      /* echo */
+        {830.61f, 280, 1600, 0.24f},
+        {659.25f, 300, 2080, 0.46f},      /* deuxieme phrase, plus douce */
+        {830.61f, 300, 2400, 0.42f},
+        {987.77f, 520, 2720, 0.38f},
+        {987.77f, 240, 3320, 0.20f},
+    };
+    const int total_ms = 3700;
+    int frames = sr * total_ms / 1000;
+    if (frames > AUDIO_MAX_FRAMES) frames = AUDIO_MAX_FRAMES;
+    memset(rec_pcm, 0, (size_t)frames * 2);
+
+    for (unsigned k = 0; k < sizeof(notes) / sizeof(notes[0]); k++) {
+        int n = sr * notes[k].ms / 1000;
+        int off = sr * notes[k].t0 / 1000;
+        float f = notes[k].f;
+        int att = sr * 6 / 1000;                 /* 6 ms d'attaque */
+        int rel = sr * 45 / 1000;                /* 45 ms d'extinction */
+        if (att < 1) att = 1;
+        if (rel > n / 2) rel = n / 2;
+        if (rel < 1) rel = 1;
+        for (int i = 0; i < n && off + i < frames; i++) {
+            float t = (float)i / (float)sr;
+            float v = 0.72f * sinf(2 * PI * f * t)
+                    + 0.22f * sinf(2 * PI * (f * 1.004f) * t)   /* desaccord : chaleur */
+                    + 0.26f * sinf(2 * PI * 2 * f * t)          /* octave */
+                    + 0.10f * sinf(2 * PI * 3 * f * t);         /* quinte */
+            float env = 1.0f;
+            if (i < att) env = (float)i / (float)att;
+            env *= expf(-6.0f * t);
+            if (i > n - rel) env *= (float)(n - i) / (float)rel;
+            int mix = (int)lroundf(v / 1.30f * env * notes[k].a * 32767.0f);
+            int16_t *p = (int16_t *)(rec_pcm + (off + i) * 2);
+            int s = (int)(*p) + mix;
+            if (s > 32767) s = 32767;
+            if (s < -32768) s = -32768;
+            *p = (int16_t)s;
+        }
+    }
+    return frames;
+}
+
+static void alarme_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(4000));            /* on laisse la carte demarrer */
+    for (;;) {
+        if (!alarme_on) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
+        if (esp_timer_get_time() - alarme_t0 > 300LL * 1000000) {
+            alarme_on = false;                  /* 5 min sans reponse : on laisse tomber */
+            show_ui();
+            continue;
+        }
+        /* on ne joue pas par-dessus la radio ou la voix */
+        if (radio_etat || voix_etat) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+        int frames = sonnerie_compose();
+        if (frames > 0) { audio_play_mono(frames); alarme_jouee++; }
+        vTaskDelay(pdMS_TO_TICKS(1300));
+    }
+}
+
 static void ui_beep(void)                 /* toucher, bouton : discret */
 {
     bip_doux(520.0f, 60, 0.07f);
@@ -7880,6 +7993,9 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddBoolToObject(r, "cal_ical", ical_url[0] != 0);
     cJSON_AddStringToObject(r, "cal_heure", ms_heure);
     cJSON_AddStringToObject(r, "cal_invitant", ms_org);
+    cJSON_AddBoolToObject(r, "alarme", alarme_on);
+    cJSON_AddNumberToObject(r, "alarme_min", ALARME_MIN);
+    cJSON_AddNumberToObject(r, "alarme_jouee", alarme_jouee);
     cJSON_AddNumberToObject(r, "cal_dans", ms_dans);
     cJSON_AddItemToObject(r, "boutons", btn_etat_json());
     cJSON_AddBoolToObject(r, "wifi_enregistre", wifi_rt ? 1 : 0);
@@ -8171,6 +8287,7 @@ static void api_start(void)
     u.handler = h_minuteur; u.uri = "/minuteur"; httpd_register_uri_handler(srv, &u);
     u.handler = h_timer; u.uri = "/timer"; httpd_register_uri_handler(srv, &u);
     u.handler = h_bouton; u.uri = "/bouton"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_alarme; u.uri = "/alarme"; httpd_register_uri_handler(srv, &u);
     u.handler = h_parle; u.uri = "/parle"; httpd_register_uri_handler(srv, &u);
     u.handler = h_dit;   u.uri = "/dit";   httpd_register_uri_handler(srv, &u);
     u.handler = h_ecran; u.uri = "/ecran"; httpd_register_uri_handler(srv, &u);
@@ -8316,6 +8433,7 @@ extern "C" void app_main(void)
     xTaskCreate(serial_task, "console", 6144, NULL, 4, NULL);
     xTaskCreate(touch_task, "tactile", 4096, NULL, 4, NULL);
     xTaskCreate(button_task, "boutons", 3072, NULL, 3, NULL);
+    xTaskCreate(alarme_task, "alarme", 4096, NULL, 3, NULL);
     xTaskCreate(ui_task, "ui", 8192, NULL, 3, NULL);   /* TLS pour la meteo */
     xTaskCreate(pet_task, "tamagotchi", 4096, NULL, 3, NULL);
     /* plus de tache "promenade" : elle redessinait la page toutes les 2 s, or

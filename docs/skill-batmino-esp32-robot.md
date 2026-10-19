@@ -469,3 +469,27 @@ Regles de dessin apprises ici :
   signes en corps 3, ca sort du cadre : couper au dernier espace.
 - Le compagnon doit etre dessine dans une bande qui ne contient aucun texte,
   sinon il passe par-dessus les noms pendant sa promenade.
+
+## La sonnerie du rendez-vous
+
+30 min avant (`ALARME_MIN`), une fois par rendez-vous, jusqu'a l'appui sur le
+bouton 1 ou 5 min sans reponse. C'est le bouton 1 qui coupe et rien d'autre :
+`bouton_court()` teste `alarme_on` AVANT tout le reste, sinon l'appui ouvrait
+aussi l'assistant.
+
+- La melodie est synthetisee dans `sonnerie_compose()` : arpege mi - sol# - si
+  (accord majeur), timbre avec octave, quinte et une deuxieme voix desaccorde
+  a +0,4 %, attaque 6 ms et extinction exponentielle. Un sinus pur ou une
+  enveloppe carree donne un bip de reveil, pas un carillon.
+- Elle est ecrite dans `rec_pcm` (le tampon du micro) et jouee par
+  `audio_play_mono()` : 3,7 s par passage, un passage toutes les 1,3 s.
+- La tache `alarme_task` ne joue pas par-dessus la radio ou la voix
+  (`radio_etat`, `voix_etat`).
+- `/alarme?t=1` lance la sonnerie a la demande (pour l'ecouter) ; sans
+  parametre elle s'arrete. `/state` donne `alarme`, `alarme_min`,
+  `alarme_jouee` (compteur de passages reellement joues — c'est ce qui prouve
+  que le haut-parleur a bien sonne, sans oreille sur place).
+- Le controle de la fenetre des 30 min doit se faire a chaque passe de
+  `ms_boucle` (une par minute), PAS apres le test `ms_prochain` : place la
+  bas, il n'etait evalue qu'une fois toutes les 5 min et la sonnerie partait
+  en retard.
