@@ -1091,6 +1091,8 @@ static const char *JOURS_SEM[] = {"DIMANCHE", "LUNDI", "MARDI", "MERCREDI", "JEU
 static const char *MOIS_AN[] = {"JANVIER", "FEVRIER", "MARS", "AVRIL", "MAI", "JUIN",
                                 "JUILLET", "AOUT", "SEPTEMBRE", "OCTOBRE", "NOVEMBRE", "DECEMBRE"};
 static const char *JOURS_COURT[] = {"DIM", "LUN", "MAR", "MER", "JEU", "VEN", "SAM"};
+static const char *MOIS_COURT[] = {"JAN", "FEV", "MAR", "AVR", "MAI", "JUI",
+                                   "JUI", "AOU", "SEP", "OCT", "NOV", "DEC"};
 
 /* minuit local d'un instant, pour compter les jours sans se tromper d'heure */
 static time_t minuit_local(time_t t)
@@ -1111,10 +1113,13 @@ static void dessine_rdv(void)
         struct tm te;
         localtime_r(&ts, &te);
         long jours = (long)((minuit_local(ts) - minuit_local(time(NULL)) + 3600) / 86400);
-        if (jours <= 0)      snprintf(quand, sizeof(quand), "AUJ. %s", ms_heure);
-        else if (jours == 1) snprintf(quand, sizeof(quand), "DEMAIN %s", ms_heure);
-        else                 snprintf(quand, sizeof(quand), "%s %s",
-                                      JOURS_COURT[te.tm_wday % 7], ms_heure);
+        if (jours <= 0)       snprintf(quand, sizeof(quand), "AUJ. %s", ms_heure);
+        else if (jours == 1)  snprintf(quand, sizeof(quand), "DEMAIN %s", ms_heure);
+        else if (jours <= 6)  snprintf(quand, sizeof(quand), "%s %s",
+                                       JOURS_COURT[te.tm_wday % 7], ms_heure);
+        else                  /* loin : le jour de la semaine ne suffit plus */
+                              snprintf(quand, sizeof(quand), "%d %s %s",
+                                       te.tm_mday, MOIS_COURT[te.tm_mon % 12], ms_heure);
     }
     if (dispo && ms_dans >= 0 && ms_dans <= 90) {
         char lab[24];
@@ -4813,6 +4818,7 @@ static void cal_travail(void *arg)
             }
         }
         cal_occupe = false;
+        show_ui();          /* le rendez-vous a peut-etre change : on redessine */
     }
 }
 
