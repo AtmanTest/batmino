@@ -40,11 +40,16 @@ PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
 
 Testable a distance : `/bouton?n=0|1&m=court|long|double`.
 
-Pages : MONDE (0, le tamagotchi en train de vivre), VISAGE (1, la tête en grand
-avec les 73 expressions), HORLOGE, CAPTEURS, RÉGLAGES, SÉCU, JOURNAL, AIDE.
-Le menu s'affiche par-dessus le monde : NOURRIR, JOUER, CALIN, NETTOYER,
-SOIGNER, DORMIR, PARLER, PAGES, AIDE — et il s'ouvre directement sur ce dont
-le personnage a besoin.
+Pages du cycle : ACCUEIL (0, tableau de bord), SYSTEM (1, cpu/ram/watts),
+HISTORIQUE (2, les derniers échanges). La page RÉGLAGES existe encore dans le
+code mais n'est plus dans le cycle (jugée mal faite) : elle reste joignable par
+`/reglages` et `/wifi`.
+
+En plus : la **page REPONSE**, éphémère. Dès qu'une réponse arrive, elle prend
+tout l'écran, en plusieurs pages si besoin (24 signes × 10 lignes en corps 2,
+donc jusqu'à ~5 pages). Bouton 2 = page suivante, puis fermeture après la
+dernière ; bouton 1 = fermer. Le texte affiché est translittéré en ASCII (la
+dalle ne connaît pas les accents : « OXYGÈNE » devenait « OXYGNE »).
 
 ## Le tamagotchi (moteur local, déterministe)
 
@@ -107,6 +112,35 @@ aucune pagination. C'est un stockage explicite, utilise par `swap_ecrire()` /
 La flash interne (SPIFFS, 1,5 Mo) ne sert plus que de secours : tout ce qui
 compte vit sur la carte.
 
+## La mémoire : tout sur la carte, en clair
+
+Chaque échange (question + réponse) est écrit **sur la partition brute** de la
+carte micro SD (p2, celle qui fait 3,5 Mo/s de lecture/écriture, pas la FAT32 à
+0,37 Mo/s). Un message = un secteur de 512 octets : rôle, longueur, texte. Le
+secteur 0 porte l'en-tête (index d'écriture, nombre de messages, compteur
+absolu). 4096 messages de réserve, la zone en fait 24 Go.
+
+Rien n'est perdu au redémarrage : au boot, la carte relit les 32 derniers tours
+dans la fenêtre PSRAM (`hist_p`) et le journal complet reste lisible par
+`/hist?n=40`.
+
+    /hist?n=40     les derniers échanges tels qu'ils sont sur la carte
+    /state         hist_sd, hist_sd_n, hist_sd_tours, hist_sd_ko, hist_sd_etat
+
+## Le cerveau : moins de tokens, et il se souvient
+
+Économie : les **6 derniers tours** partent tels quels au modèle, les plus
+anciens sous forme d'un **rappel compact** d'une ligne chacun (« MINO: …22
+signes »). C'est `contexte_octets` dans `/state` qui montre ce qui a vraiment
+été envoyé (quelques centaines d'octets au lieu de plusieurs Ko).
+
+Cache d'échanges : si la question renvoie à quelque chose de déjà dit et que le
+modèle n'est pas sûr, il rend `{"souvien":"2 a 4 mots","dit":""}` ; la carte va
+alors **chercher ces mots dans l'historique de la SD** (200 derniers messages),
+envoie les extraits trouvés (le message + la réponse qui suit) et redemande la
+réponse une seule fois. C'est ce qui permet de reprendre le fil sans renvoyer
+tout l'historique.
+
 ## L'assistant vocal
 
 Tout se passe sur la carte, sans PC : micro -> WAV en PSRAM -> Groq
@@ -116,8 +150,14 @@ Tout se passe sur la carte, sans PC : micro -> WAV en PSRAM -> Groq
 
     appui court bouton 1 sur l'accueil -> "PARLE MAINTENANT" (le micro s'ouvre,
     l'enregistrement s'arrete seul apres 1 s de silence, max 6 s)
-      -> "JE REFLECHIS" -> la reponse s'affiche et se dit
+      -> "JE REFLECHIS" -> la reponse s'affiche en pages plein ecran
     appui court bouton 2 -> l'ecoute est coupee proprement, page suivante
+
+**Le haut-parleur est muet par defaut** : le robot répond à l'écran, il ne parle
+pas (`voix_sortie:false` dans `/state`, et `voix_dit_nb` compte les phrases
+produites). `/voix?o=1` rallume la synthèse vocale, `/voix?o=0` la coupe.
+La veille automatique de nuit (22h-7h) est également désactivée par défaut :
+`/veille?o=0|1`.
 
 Si le Wi-Fi manque, la carte le dit a l'ecran au lieu d'attendre.
 
@@ -166,9 +206,21 @@ tous les 10 rafraîchissements partiels.
 ## Compiler, flasher, regarder
 
     cd /home/taz/mino-fw
-    export IDF_TOOLS_PATH=/opt/espressif-tools && source /opt/esp-idf/export.sh
-    idf.py build
-    idf.py -p /dev/ttyACM0 flash
+    source tools/env.sh          # voir la note ci-dessous
+    idf build
+    idf -p /dev/ttyACM0 flash
+    # ou, sans cable, par wifi :
+    python3 tools/maj_wifi.py 192.168.8.209     # POST /maj, redemarrage, revient en ligne
+
+> **`export.sh` casse depuis la montée de Python 3.14** : le venv
+> `/opt/espressif-tools/python_env/idf5.5_py3.14_env` n'a plus de
+> `pydantic_core` utilisable et `check-python-dependencies` refuse `click 8.5`
+> / `cryptography 50`. Inutile de réinstaller ESP-IDF : `tools/env.sh` pose
+> `IDF_PATH`, le PATH du toolchain xtensa et un `PYTHONPATH=~/.idf-extra` où
+> `pydantic-core==2.50.1` est installé, puis expose la fonction `idf`.
+> Créer ce dossier une fois :
+> `python3 -m pip install --target ~/.idf-extra pydantic-core==2.50.1`
+> (avec le python du venv ESP-IDF).
 
     cd tools
     g++ -O2 -o preview preview.cpp ../main/art.cpp ../main/petart.cpp ../main/pet.cpp -lm -lz
@@ -195,7 +247,12 @@ commande part pendant le démarrage et personne ne répond.
 
 ## API HTTP de la carte
 
-    /state                 état complet (stade, jauges, cpu, forme)
+    /state                 état complet (stade, jauges, cpu, forme, voix, historique)
+    /hist?n=40             les derniers échanges, lus sur la carte SD
+    /voix?o=0|1            coupe / rallume le haut-parleur (muet par défaut)
+    /veille?o=0|1          mise en veille automatique la nuit (désactivée)
+    /dit?t=...             pose une question au cerveau et affiche la réponse
+    /tts?q=...             synthèse vocale directe (ne fait rien si muet)
     /face?e=<famille|expression>   visage (familles : colere, peur, joie...)
     /pet?a=manger|jouer|calin|nettoyer|soigner|dormir|reveiller
     /say?emotion=<famille>&text=... texte + visage
