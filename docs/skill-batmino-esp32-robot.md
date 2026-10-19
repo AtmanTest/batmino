@@ -472,10 +472,11 @@ Regles de dessin apprises ici :
 
 ## La sonnerie du rendez-vous
 
-30 min avant (`ALARME_MIN`), une fois par rendez-vous, jusqu'a l'appui sur le
-bouton 1 ou 5 min sans reponse. C'est le bouton 1 qui coupe et rien d'autre :
-`bouton_court()` teste `alarme_on` AVANT tout le reste, sinon l'appui ouvrait
-aussi l'assistant.
+30 min avant (`ALARME_MIN`), une fois par rendez-vous : le carillon, puis la
+voix qui annonce « Rendez-vous dans 30 minutes avec <nom>. ». Pas de boucle,
+donc plus besoin de la faire taire — mais le bouton 1 coupe quand meme le
+carillon (et annule la voix si on appuie pendant). `bouton_court()` teste
+`alarme_on` AVANT tout le reste, sinon l'appui ouvrait aussi l'assistant.
 
 - La melodie est synthetisee dans `sonnerie_compose()` : arpege mi - sol# - si
   (accord majeur), timbre avec octave, quinte et une deuxieme voix desaccorde
@@ -485,6 +486,8 @@ aussi l'assistant.
   `audio_play_mono()` : 3,7 s par passage, un passage toutes les 1,3 s.
 - La tache `alarme_task` ne joue pas par-dessus la radio ou la voix
   (`radio_etat`, `voix_etat`).
+- La phrase est verifiee par `/state` -> `voix_dit` : c'est la derniere phrase
+  envoyee au service de synthese, donc la preuve que l'annonce est bien partie.
 - `/alarme?t=1` lance la sonnerie a la demande (pour l'ecouter) ; sans
   parametre elle s'arrete. `/state` donne `alarme`, `alarme_min`,
   `alarme_jouee` (compteur de passages reellement joues — c'est ce qui prouve

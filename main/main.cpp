@@ -6971,16 +6971,30 @@ static void alarme_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(4000));            /* on laisse la carte demarrer */
     for (;;) {
         if (!alarme_on) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
-        if (esp_timer_get_time() - alarme_t0 > 300LL * 1000000) {
-            alarme_on = false;                  /* 5 min sans reponse : on laisse tomber */
-            show_ui();
-            continue;
-        }
         /* on ne joue pas par-dessus la radio ou la voix */
         if (radio_etat || voix_etat) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+
+        /* 1. le carillon, une seule fois */
         int frames = sonnerie_compose();
         if (frames > 0) { audio_play_mono(frames); alarme_jouee++; }
-        vTaskDelay(pdMS_TO_TICKS(1300));
+        if (!alarme_on) continue;               /* coupee pendant le carillon */
+
+        /* 2. la voix annonce le rendez-vous */
+        char phrase[160];
+        if (ms_dans >= 0 && ms_dans <= ALARME_MIN + 5 && (ms_org[0] || ms_titre[0]))
+            snprintf(phrase, sizeof(phrase), "Rendez-vous dans %d minutes avec %s.",
+                     ms_dans, ms_org[0] ? ms_org : ms_titre);
+        else if (ms_org[0] || ms_titre[0])
+            snprintf(phrase, sizeof(phrase), "Rendez-vous avec %s.",
+                     ms_org[0] ? ms_org : ms_titre);
+        else
+            snprintf(phrase, sizeof(phrase), "Vous avez un rendez-vous.");
+
+        alarme_on = false;                      /* une fois, pas en boucle */
+        ESP_LOGI(TAG, "alarme : %s", phrase);
+        voix_dit(phrase);
+        show_ui();
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
