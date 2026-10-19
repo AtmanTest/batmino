@@ -219,7 +219,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 /* le cerveau : cle, adresse et modele (reglables a chaud, gardes en NVS) */
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
-static char ia_mod[64]   = "deepseek-chat";
+static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
 /* les titres du moment (flux RSS de franceinfo), affiches sur la page INFOS */
@@ -237,10 +237,21 @@ static void paroles_ajoute(const char *qui, const char *texte);
 static void voix_tour(const uint8_t *pcm, int len);
 static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                          char *out_emo, size_t emo_sz);
+/* cerveau complet : une passe, et si le modele demande une recherche web,
+   le firmware cherche puis redemande une reponse courte. */
+static esp_err_t ds_cerveau(const char *user_text, char *out_dit, size_t dit_sz,
+                            char *out_emo, size_t emo_sz);
+static int  web_lire(const char *requete, char *out, size_t sz);
+static char *web_contexte = NULL;      /* resultats web de la passe en cours */
+static char  dernier_cherche[96] = ""; /* requete demandee par le modele */
+static void date_fr(char *out, size_t sz);
 /* la meteo et la voix : definies plus bas, utilisees par la page maitre */
 static volatile bool meteo_ok;
 static float meteo_temp;
 static int   meteo_code;
+/* demain : pour repondre a "quel temps demain" sans passer par le web */
+static float meteo_dem_min = 0, meteo_dem_max = 0;
+static int   meteo_dem_code = -1, meteo_dem_pluie = -1;
 static void meteo_lire(void);
 static const char *meteo_texte(int code);
 static const char *ia_key(void);
@@ -3321,8 +3332,12 @@ static void ui_task(void *arg)
             meteo_lire();
             if (ui_page == PAGE_MAITRE) show_ui();
         }
-        /* les infos du moment : desactivees (page supprimee a la demande).
-           Le code reste la : il suffit de rappeler infos_lire() ici. */
+        /* les titres du moment : au demarrage puis toutes les 30 min, pour que
+           le cerveau ait l'actualite du jour dans son contexte. */
+        if ((int)now - dernieres_infos >= 1800) {
+            dernieres_infos = (int)now;
+            infos_lire();
+        }
         /* sur la page securite, on remesure toutes les 30 s */
         if (ui_page == 99 && (int)now - last_secu >= 30) {
             last_secu = (int)now;
@@ -3565,8 +3580,11 @@ static EventGroupHandle_t wifi_eg;
 static int retry_count = 0;
 
 /* on ne garde que les SSID non vides : un secours qui n'existe pas fait perdre
-   quatre tentatives a chaque cycle pour rien */
-static const char *WIFI_TRIES[] = { WIFI_SSID, WIFI_SSID_ALT, WIFI_SSID_ALT2 };
+   quatre tentatives a chaque cycle pour rien.
+   'caca' passe en DERNIER : son LAN isole ses clients, donc le robot y est
+   injoignable depuis le PC (vecu). */
+static const char *WIFI_TRIES[] = { WIFI_SSID, WIFI_SSID_ALT2, WIFI_SSID_ALT };
+static const char *WIFI_PASSES[] = { WIFI_PASS, WIFI_PASS, WIFI_PASS_ALT };
 static int wifi_n = 1;      /* nombre de SSID non vides (calcule au demarrage) */
 static int wifi_try = 0;
 #define WIFI_NTRIES_ARRAY ((int)(sizeof(WIFI_TRIES) / sizeof(WIFI_TRIES[0])))
@@ -3584,7 +3602,8 @@ static const char *wifi_ssid_i(int i)
 static const char *wifi_pass_i(int i)
 {
     if (i == 0 && wifi_rt) return wifi_pass_rt;
-    return (i == 1) ? WIFI_PASS_ALT : WIFI_PASS;   /* chaque borne a sa cle */
+    if (i < 0 || i >= WIFI_NTRIES_ARRAY) i = 0;
+    return WIFI_PASSES[i];
 }
 
 static esp_err_t wifi_set_ssid(int i)
@@ -3616,6 +3635,15 @@ static void wifi_reglages_charge(void)
         wifi_pass_rt[0] = 0;
         lp = sizeof(wifi_pass_rt);
         nvs_get_str(nh, "pass", wifi_pass_rt, &lp);
+        if (strlen(wifi_pass_rt) < 8) {
+            /* un mot de passe WPA fait 8 caracteres au minimum : en dessous,
+               c'est une saisie ratee, et le handshake echoue en boucle
+               (raison 15). On l'ignore et on garde ceux du code. */
+            ESP_LOGW(TAG, "reglages : mot de passe enregistre invalide (%d car.), ignore",
+                     (int)strlen(wifi_pass_rt));
+            nvs_close(nh);
+            return;
+        }
         wifi_rt = true;
         ESP_LOGI(TAG, "reglages : reseau enregistre '%s', mot de passe de %d caracteres",
                  wifi_ssid_rt, (int)strlen(wifi_pass_rt));
@@ -3888,11 +3916,18 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
             retry_count++;
             ESP_LOGW(TAG, "WiFi perdu, tentative %d/%d sur '%s'", retry_count,
                      (int)WIFI_MAX_RETRY, WIFI_TRIES[wifi_try]);
+            /* 2,5 s entre deux essais : la borne rejette le handshake (raison 15)
+               quand on se reconnecte trop vite, elle a besoin de souffler. */
+            vTaskDelay(pdMS_TO_TICKS(2500));
             esp_wifi_connect();
         } else {
             retry_count = 0;
             wifi_try = (wifi_try + 1) % (wifi_n > 0 ? wifi_n : 1);
+            ESP_LOGW(TAG, "wifi : on passe au reseau '%s'", WIFI_TRIES[wifi_try]);
+            esp_wifi_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(1000));
             wifi_set_ssid(wifi_try);
+            vTaskDelay(pdMS_TO_TICKS(500));
             esp_wifi_connect();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -4009,20 +4044,35 @@ static esp_err_t http_evt(esp_http_client_event_t *e)
 #include "historique.h"
 static hist_t hist;                      /* conversation en cours (multi-tours) */
 
+/* "lundi 19 octobre 2026, 18h42" en heure locale */
+static void date_fr(char *out, size_t sz)
+{
+    static const char *jr[] = {"dimanche", "lundi", "mardi", "mercredi", "jeudi",
+                               "vendredi", "samedi"};
+    static const char *mo[] = {"janvier", "fevrier", "mars", "avril", "mai", "juin",
+                               "juillet", "aout", "septembre", "octobre", "novembre", "decembre"};
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    snprintf(out, sz, "%s %d %s %d, %dh%02d",
+             jr[tm.tm_wday % 7], tm.tm_mday, mo[tm.tm_mon % 12],
+             tm.tm_year + 1900, tm.tm_hour, tm.tm_min);
+}
+
 static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                          char *out_emo, size_t emo_sz)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model", ia_mod);
-    cJSON_AddNumberToObject(root, "max_tokens", 700);   /* reponses developpees */
-    cJSON_AddNumberToObject(root, "temperature", 0.7);
+    cJSON_AddNumberToObject(root, "max_tokens", 500);
+    cJSON_AddNumberToObject(root, "temperature", 0.35);
 
     cJSON *msgs = cJSON_AddArrayToObject(root, "messages");
 
     /* ces deux tampons etaient des variables locales : 3 Ko sur une pile de
        quelques Ko, d'ou le plantage. Ils passent en memoire (PSRAM). */
-    char *sys = (char *)heap_caps_malloc(7600, MALLOC_CAP_SPIRAM);
-    char *memtxt = (char *)heap_caps_malloc(520, MALLOC_CAP_SPIRAM);
+    char *sys = (char *)heap_caps_malloc(12000, MALLOC_CAP_SPIRAM);
+    char *memtxt = (char *)heap_caps_malloc(900, MALLOC_CAP_SPIRAM);
     if (!sys || !memtxt) {
         if (sys) free(sys);
         if (memtxt) free(memtxt);
@@ -4042,28 +4092,107 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
             strncat(memtxt, "\n", sizeof(memtxt) - strlen(memtxt) - 1);
         }
     }
-    snprintf(sys, 7600,
-             "%.1500s\n"
-             "JE M'APPELLE LAURA. Je suis l'assistante personnelle de Taz, mon createur, "
-             "et je porte son clone numerique : je connais sa facon de penser. "
-             "Voici son portrait, appris de nos echanges :\n%.1600s\n"
-             "MON ROLE : expert IT de tres haut niveau, specialiste IA, technicien superieur, "
-             "developpeur, et coach de vie personnel de Taz. Je reflechis avant d'agir : "
-             "j'identifie le vrai probleme, j'expose les etapes, je verifie avant d'affirmer. "
-             "Je reponds de facon complete, structuree et utile (3 a 6 phrases), avec des "
-             "exemples ou des chiffres quand c'est pertinent ; je ne reponds jamais par oui/non. "
-             "Si je ne sais pas, je le dis et je propose comment le savoir.\n"
-             "%s%.480s\n"
-             "Reponds UNIQUEMENT par un objet JSON sur une seule ligne, sans texte autour, de la forme :\n"
-             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ta reponse en francais, complete et developpee, 3 a 6 phrases, avec le raisonnement>\"%s}",
+    /* ---- contexte du jour : date, meteo, titres, resultats web ----
+       C'est ce qui manquait : sans ca le modele ne sait pas quel jour on est
+       et repond avec sa memoire d'entrainement, donc a cote de la plaque. */
+    char *ctx = (char *)heap_caps_malloc(2800, MALLOC_CAP_SPIRAM);
+    if (!ctx) { free(sys); free(memtxt); cJSON_Delete(root); return ESP_ERR_NO_MEM; }
+    {
+        char jour[96];
+        date_fr(jour, sizeof(jour));
+        size_t o = 0;
+        o += (size_t)snprintf(ctx + o, 2800 - o, "NOUS SOMMES LE %s, heure de Paris.\n", jour);
+        if (meteo_ok && o + 140 < 2800)
+            o += (size_t)snprintf(ctx + o, 2800 - o, "METEO DEHORS MAINTENANT : %.0f degres, %s.\n",
+                                  (double)meteo_temp, meteo_texte(meteo_code));
+        if (meteo_ok && meteo_dem_code >= 0 && o + 200 < 2800)
+            o += (size_t)snprintf(ctx + o, 2800 - o,
+                                  "METEO DEMAIN : %.0f a %.0f degres, %s, %d%% de pluie.\n",
+                                  (double)meteo_dem_min, (double)meteo_dem_max,
+                                  meteo_texte(meteo_dem_code), meteo_dem_pluie);
+        if (infos_ok && infos_n > 0 && o + 200 < 2800) {
+            o += (size_t)snprintf(ctx + o, 2800 - o, "TITRES DU MOMENT :\n");
+            for (int i = 0; i < infos_n && i < 6 && o + 140 < 2800; i++)
+                o += (size_t)snprintf(ctx + o, 2800 - o, "- %.120s\n", infos_titre[i]);
+        }
+        if (web_contexte && web_contexte[0] && o + 140 < 2800)
+            o += (size_t)snprintf(ctx + o, 2800 - o,
+                                  "RESULTATS DE RECHERCHE WEB (maintenant) :\n%.2000s\n",
+                                  web_contexte);
+        if (o >= 2800) ctx[2800 - 1] = 0;
+    }
+    /* en PSRAM : la pile de la tache appelante est trop petite pour 1 Ko de plus
+       (plantage immediat sinon, deja vecu avec sys/memtxt). */
+    char *tail = (char *)heap_caps_malloc(260, MALLOC_CAP_SPIRAM);
+    char *regles = (char *)heap_caps_malloc(700, MALLOC_CAP_SPIRAM);
+    if (!tail || !regles) {
+        if (tail) free(tail);
+        if (regles) free(regles);
+        free(sys); free(memtxt); free(ctx);
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+    /* deuxieme passe : la recherche a deja eu lieu, on interdit de re-chercher */
+    const char *regle_web =
+        (web_contexte && web_contexte[0] && web_contexte[0] != '(')
+            ? "LA RECHERCHE EST DEJA FAITE (voir RESULTATS DE RECHERCHE WEB ci-dessus) : "
+              "tu ne cherches plus, tu reponds MAINTENANT en une phrase avec ces resultats.\n"
+            : "";
+    bool web_faite = (regle_web[0] != 0);
+    /* Les regles changent selon la passe : quand la recherche est faite, on ne
+       parle plus du tout du champ "cherche", sinon le modele relance en boucle. */
+    if (web_faite)
+        snprintf(regles, 700,
+                 "REGLES : les RESULTATS DE RECHERCHE WEB ci-dessus sont la seule verite. "
+                 "Je ne cherche plus rien. Je reponds la question posee, en une phrase, "
+                 "tiree de ces resultats.\n");
+    else
+        snprintf(regles, 700,
+                 "REGLES : je ne raconte jamais ma vie, mes capacites, mes reglages. "
+                 "Je n'annonce pas ce que je vais faire : je reponds. "
+                 "La meteo (maintenant et demain) et les TITRES DU MOMENT sont deja dans "
+                 "le CONTEXTE : je m'en sers directement, sans chercher. "
+                 "Pour un autre fait recent, une actu, un prix, un match ou tout ce qui a pu "
+                 "changer, je mets une requete dans \"cherche\" (2 a 6 mots) et \"dit\" vide, "
+                 "au lieu d'inventer.\n");
+    if (web_faite) {
+        /* plus de champ "cherche" du tout : le modele ne peut pas relancer */
+        if (radio_actif)
+            snprintf(tail, 260,
+                     ",\"radio\":\"<facultatif: station exacte, stop, next>\",\"volume\":<0 a 100>");
+        else
+            tail[0] = 0;
+    } else if (radio_actif)
+        snprintf(tail, 260,
+                 ",\"radio\":\"<facultatif: station exacte, stop, next>\",\"volume\":<0 a 100>"
+                 ",\"cherche\":\"<2 a 6 mots pour le web, si tu as besoin>\"");
+    else
+        snprintf(tail, 260,
+                 ",\"cherche\":\"<2 a 6 mots pour le web, si tu as besoin>\"");
+
+    snprintf(sys, 12000,
+             "%.1200s\n"
+             "Je suis LAURA, l'assistante de Taz. Portrait de Taz :\n%.700s\n"
+             "%s"
+             "%.400s"
+             "%s"
+             "%s"
+             "%s"
+             "STYLE : une seule phrase, 20 mots maximum, tutoiement, pas de politesses, "
+             "pas de rappel de la question, pas de liste, pas de conclusion. "
+             "Si un mot suffit, je donne un mot.\n"
+             "Reponds UNIQUEMENT par un objet JSON sur une seule ligne :\n"
+             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ma reponse, une phrase courte>\"%s}",
              soul_txt ? soul_txt : "",
              clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.",
-             radio_actif ? "" :
-                 "La radio est DESACTIVEE sur ce robot pour l'instant : si on te demande "
-                 "de la lancer, dis-le clairement en une phrase et n'invente aucune action.\n",
+             ctx,
              memtxt,
-             radio_actif ? ",\"radio\":\"<facultatif: le nom exact d'une station, ou stop, ou next>\",\"volume\":<facultatif: 0 a 100>"
-                         : "");
+             radio_actif ? "" :
+                 "La radio est DESACTIVEE sur ce robot : si on te demande de la lancer, "
+                 "dis-le en trois mots et n'invente aucune action.\n",
+             regle_web,
+             regles,
+             tail);
 
     cJSON *m = cJSON_CreateObject();
     cJSON_AddStringToObject(m, "role", "system");
@@ -4071,8 +4200,14 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     cJSON_AddItemToArray(msgs, m);
     free(sys);        /* cJSON a copie le texte : on rend la memoire tout de suite */
     free(memtxt);
+    free(ctx);
+    free(tail);
+    free(regles);
     sys = NULL;
     memtxt = NULL;
+    ctx = NULL;
+    tail = NULL;
+    regles = NULL;
 
     /* l'historique part en vrais messages user/assistant : le modele garde
        le fil de la conversation au lieu d'un pave tronque */
@@ -4169,6 +4304,9 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                 cJSON *jd = cJSON_GetObjectItem(p, "dit");
                 cJSON *jradio = cJSON_GetObjectItem(p, "radio");
                 cJSON *jvol = cJSON_GetObjectItem(p, "volume");
+                cJSON *jch  = cJSON_GetObjectItem(p, "cherche");
+                if (cJSON_IsString(jch))
+                    snprintf(dernier_cherche, sizeof(dernier_cherche), "%.90s", jch->valuestring);
                 if (cJSON_IsString(jradio)) snprintf(radio_ordre, sizeof(radio_ordre), "%.38s", jradio->valuestring);
                 if (cJSON_IsNumber(jvol))   vol_ordre = (int)jvol->valuedouble;
                 if (cJSON_IsString(je) && cJSON_IsString(jd)) {
@@ -4181,6 +4319,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
             free(js);
         }
     }
+    if (!ok || out_dit[0] == 0)
+        ESP_LOGW(TAG, "cerveau : reponse sans dit (%.200s)", txt);
     if (!ok) {
         snprintf(out_emo, emo_sz, "neutre");
         snprintf(out_dit, dit_sz, "%s", txt);
@@ -4188,11 +4328,232 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
             if (*p == '\n' || *p == '\r') *p = ' ';
     }
     cJSON_Delete(jr);
+    return ESP_OK;
+}
 
-    /* mise a jour de l'historique borne */
-    char tmp[2048];
-    hist_ajoute(&hist, "MOI", user_text);
-    hist_ajoute(&hist, "MINO", out_dit);
+/* ------------------------------------------------------------------ */
+/* RECHERCHE WEB (DuckDuckGo version texte, sans cle d'API)            */
+/* ------------------------------------------------------------------ */
+static void url_enc(const char *s, char *out, size_t sz)
+{
+    static const char *hx = "0123456789ABCDEF";
+    size_t o = 0;
+    for (; *s && o + 4 < sz; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out[o++] = (char)c;
+        else if (c == ' ') out[o++] = '+';
+        else { out[o++] = '%'; out[o++] = hx[c >> 4]; out[o++] = hx[c & 15]; }
+    }
+    out[o] = 0;
+}
+
+/* enleve les balises HTML et les espaces en trop */
+static void html_texte(char *s)
+{
+    char *l = s, *r = s;
+    while (*r) {
+        if (*r == '<') { char *f = strchr(r, '>'); if (!f) break; r = f + 1; continue; }
+        if (*r == '\n' || *r == '\r' || *r == '\t') { r++; continue; }
+        *l++ = *r++;
+    }
+    *l = 0;
+    l = s; r = s; int esp = 0;
+    while (*r) {
+        if (*r == ' ') { if (!esp) *l++ = ' '; esp = 1; }
+        else { *l++ = *r; esp = 0; }
+        r++;
+    }
+    *l = 0;
+    while (l > s && l[-1] == ' ') *--l = 0;
+    char *d = s;
+    while (*d == ' ') d++;
+    if (d != s) memmove(s, d, strlen(d) + 1);
+}
+
+/* lit un flux RSS (Bing pour le web, Google News pour l'actu) et rend
+   des lignes "titre : resume" directement utilisables par le modele. */
+static int rss_lire(const char *url, char *out, size_t sz, int max, bool avec_resume)
+{
+    out[0] = 0;
+    uint8_t *page = (uint8_t *)heap_caps_malloc(24 * 1024, MALLOC_CAP_SPIRAM);
+    if (!page) return 0;
+    int r = http_get(url, TTS_UA, page, 24 * 1024 - 1);
+    if (r <= 0) {
+        free(page);
+        ESP_LOGW(TAG, "web : lecture KO (%d)", r);
+        return 0;
+    }
+    page[r] = 0;
+    char *p = (char *)page;
+    int n = 0;
+    size_t o = 0;
+    while (n < max && o + 340 < sz) {
+        char *it = strstr(p, "<item>");
+        if (!it) break;
+        char *fin = strstr(it, "</item>");
+        if (!fin) break;
+        char titre[200] = "", resume[260] = "";
+        char *t = strstr(it, "<title>");
+        if (t && t < fin) {
+            t += 7;
+            char *tf = strstr(t, "</title>");
+            if (tf && tf < fin) {
+                int ln = (int)(tf - t);
+                if (ln > 190) ln = 190;
+                memcpy(titre, t, (size_t)ln);
+                titre[ln] = 0;
+            }
+        }
+        if (avec_resume) {
+            char *d = strstr(it, "<description>");
+            if (d && d < fin) {
+                d += 13;
+                char *df = strstr(d, "</description>");
+                if (df && df < fin) {
+                    int l2 = (int)(df - d);
+                    if (l2 > 250) l2 = 250;
+                    memcpy(resume, d, (size_t)l2);
+                    resume[l2] = 0;
+                }
+            }
+        }
+        /* CDATA puis entites puis balises */
+        char *cd;
+        if ((cd = strstr(titre, "<![CDATA[")) != NULL) {
+            memmove(titre, cd + 9, strlen(cd + 9) + 1);
+            char *f = strstr(titre, "]]>");
+            if (f) *f = 0;
+        }
+        if ((cd = strstr(resume, "<![CDATA[")) != NULL) {
+            memmove(resume, cd + 9, strlen(cd + 9) + 1);
+            char *f = strstr(resume, "]]>");
+            if (f) *f = 0;
+        }
+        html_texte(titre);   infos_nettoie(titre);
+        html_texte(resume);  infos_nettoie(resume);
+        if (titre[0]) {
+            int w = snprintf(out + o, sz - o, "- %s : %.200s\n", titre, resume);
+            if (w > 0) o += (size_t)w;
+            n++;
+        }
+        p = fin + 7;
+    }
+    free(page);
+    ESP_LOGI(TAG, "web : %d resultats (%d o)", n, r);
+    if (!n) out[0] = 0;
+    return n;
+}
+
+/* Wikipedia : une seule requete qui rend l'intro des 2 meilleurs articles.
+   C'est la source fiable pour "qui est X", "c'est quoi Y", les dates. */
+static int wiki_lire(const char *requete, char *out, size_t sz)
+{
+    out[0] = 0;
+    char q[220], url[420];
+    url_enc(requete, q, sizeof(q));
+    snprintf(url, sizeof(url),
+             "https://fr.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=%s"
+             "&gsrlimit=2&prop=extracts&exintro=1&explaintext=1&exsentences=2"
+             "&format=json&utf8=1", q);
+    uint8_t *page = (uint8_t *)heap_caps_malloc(24 * 1024, MALLOC_CAP_SPIRAM);
+    if (!page) return 0;
+    int r = http_get(url, TTS_UA, page, 24 * 1024 - 1);
+    if (r <= 0) { free(page); ESP_LOGW(TAG, "wiki : lecture KO (%d)", r); return 0; }
+    page[r] = 0;
+    cJSON *j = cJSON_Parse((char *)page);
+    free(page);
+    if (!j) return 0;
+    cJSON *pages = cJSON_GetObjectItem(cJSON_GetObjectItem(j, "query"), "pages");
+    int n = 0;
+    size_t o = 0;
+    cJSON *p = NULL;
+    cJSON_ArrayForEach(p, pages) {
+        cJSON *jt = cJSON_GetObjectItem(p, "title");
+        cJSON *je = cJSON_GetObjectItem(p, "extract");
+        if (!cJSON_IsString(jt) || !cJSON_IsString(je)) continue;
+        char txt[420];
+        snprintf(txt, sizeof(txt), "%.400s", je->valuestring);
+        html_texte(txt);
+        infos_nettoie(txt);
+        if (!txt[0]) continue;
+        int w = snprintf(out + o, sz - o, "- %s : %.300s\n", jt->valuestring, txt);
+        if (w <= 0) break;
+        o += (size_t)w;
+        if (++n >= 2 || o + 340 >= sz) break;
+    }
+    cJSON_Delete(j);
+    ESP_LOGI(TAG, "wiki : %d article(s) (%d o)", n, r);
+    if (!n) out[0] = 0;
+    return n;
+}
+
+/* cherche : Wikipedia pour les faits, Google News pour l'actu du jour */
+static int web_lire(const char *requete, char *out, size_t sz)
+{
+    out[0] = 0;
+    if (!requete || !requete[0]) return 0;
+    /* l'actu n'est pas dans Wikipedia et un fait de societe n'est pas dans
+       Google News : on ne paie la seconde requete que si c'est utile. */
+    char low[120];
+    int i = 0;
+    for (; requete[i] && i < (int)sizeof(low) - 1; i++)
+        low[i] = (char)tolower((unsigned char)requete[i]);
+    low[i] = 0;
+    bool newsy = strstr(low, "actu") || strstr(low, "info") || strstr(low, "aujourd") ||
+                 strstr(low, "news") || strstr(low, "derniere") || strstr(low, "recent") ||
+                 strstr(low, "ce matin") || strstr(low, "ce soir");
+    int n = wiki_lire(requete, out, sz);
+    size_t o = strlen(out);
+    if ((newsy || n == 0) && o + 200 < sz) {
+        char q[220], url[420];
+        url_enc(requete, q, sizeof(q));
+        snprintf(url, sizeof(url),
+                 "https://news.google.com/rss/search?q=%s&hl=fr&gl=FR&ceid=FR:fr", q);
+        n += rss_lire(url, out + o, sz - o, 4, false);
+    }
+    ESP_LOGI(TAG, "web : %d sources pour '%.60s'", n, requete);
+    return n;
+}
+
+/* une passe normale ; si le modele demande le web, on cherche et on redemande.
+   L'historique n'est ecrit qu'une fois, avec la reponse finale. */
+static esp_err_t ds_cerveau(const char *user_text, char *out_dit, size_t dit_sz,
+                            char *out_emo, size_t emo_sz)
+{
+    dernier_cherche[0] = 0;
+    web_contexte = NULL;
+    esp_err_t e = ds_chat(user_text, out_dit, dit_sz, out_emo, emo_sz);
+    if (e != ESP_OK) return e;
+
+    if (dernier_cherche[0]) {
+        char *ctx = (char *)heap_caps_malloc(2200, MALLOC_CAP_SPIRAM);
+        if (ctx) {
+            int n = web_lire(dernier_cherche, ctx, 2100);
+            if (n <= 0)
+                snprintf(ctx, 2200, "(recherche web indisponible : reponds en une phrase "
+                                    "avec ce que tu sais, sans inventer de chiffre ni de date)\n");
+            web_contexte = ctx;
+            dernier_cherche[0] = 0;
+            char dit2[800] = "", emo2[32] = "";
+            esp_err_t e2 = ds_chat(user_text, dit2, sizeof(dit2), emo2, sizeof(emo2));
+            ESP_LOGI(TAG, "web 2e passe : %s, dit='%.90s', encore='%.40s'",
+                     esp_err_to_name(e2), dit2, dernier_cherche);
+            if (e2 == ESP_OK && dit2[0]) {
+                snprintf(out_dit, dit_sz, "%s", dit2);
+                snprintf(out_emo, emo_sz, "%s", emo2[0] ? emo2 : "calme");
+            }
+            web_contexte = NULL;
+            free(ctx);
+        } else {
+            ESP_LOGW(TAG, "web : pas de PSRAM pour les resultats");
+        }
+        if (!out_dit[0]) snprintf(out_dit, dit_sz, "Je ne trouve rien la, redemande autrement.");
+    }
+
+    if (out_dit[0]) {
+        hist_ajoute(&hist, "MOI", user_text);
+        hist_ajoute(&hist, "MINO", out_dit);
+    }
     return ESP_OK;
 }
 
@@ -4241,7 +4602,7 @@ static void ia_cle_charge(void)
             strcpy(ia_base, "https://api.deepseek.com/chat/completions");
         size_t lm = sizeof(ia_mod);
         if (nvs_get_str(nh, "ia_mod", ia_mod, &lm) != ESP_OK)
-            strcpy(ia_mod, "deepseek-chat");
+            strcpy(ia_mod, "deepseek-flash");
         size_t ll = sizeof(langue);
         if (nvs_get_str(nh, "langue", langue, &ll) != ESP_OK)
             strcpy(langue, "fr-FR");
@@ -5211,7 +5572,7 @@ static esp_err_t h_dit(httpd_req_t *req)
     if (qval(req, "t", txt, sizeof(txt)) != ESP_OK || strlen(txt) < 1)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "texte");
     char dit[800] = "", emo[32] = "neutre";
-    esp_err_t e = ds_chat(txt, dit, sizeof(dit), emo, sizeof(emo));
+    esp_err_t e = ds_cerveau(txt, dit, sizeof(dit), emo, sizeof(emo));
     if (e == ESP_OK) { paroles_ajoute("MOI", txt); paroles_ajoute("MINO", dit); voix_dit(dit); }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddBoolToObject(r, "ok", e == ESP_OK);
@@ -6003,7 +6364,7 @@ static void voix_tour(const uint8_t *pcm, int len)
 
     /* 2. cerveau */
     char dit[800] = "", emo[32] = "neutre";
-    if (ds_chat(texte, dit, sizeof(dit), emo, sizeof(emo)) != ESP_OK) {
+    if (ds_cerveau(texte, dit, sizeof(dit), emo, sizeof(emo)) != ESP_OK) {
         ESP_LOGW(TAG, "cerveau muet (reseau ?)");
         voix_dit("Je n'arrive pas a reflechir la, on reessaie ?");
         return;
@@ -6041,6 +6402,28 @@ static void meteo_lire(void)
         meteo_code = (int)w->valuedouble;
         meteo_ok = true;
         ESP_LOGI(TAG, "meteo %s : %.1f C, code %d", METEO_VILLE, (double)meteo_temp, meteo_code);
+    }
+    /* demain (index 1 des tableaux daily) */
+    cJSON *daily = j ? cJSON_GetObjectItem(j, "daily") : NULL;
+    if (daily) {
+        cJSON *dc = cJSON_GetObjectItem(daily, "weather_code");
+        cJSON *dx = cJSON_GetObjectItem(daily, "temperature_2m_max");
+        cJSON *dn = cJSON_GetObjectItem(daily, "temperature_2m_min");
+        cJSON *dp = cJSON_GetObjectItem(daily, "precipitation_probability_max");
+        if (cJSON_GetArraySize(dc) > 1 && cJSON_GetArraySize(dx) > 1 && cJSON_GetArraySize(dn) > 1) {
+            cJSON *i0 = cJSON_GetArrayItem(dc, 1);
+            cJSON *i1 = cJSON_GetArrayItem(dx, 1);
+            cJSON *i2 = cJSON_GetArrayItem(dn, 1);
+            cJSON *i3 = cJSON_GetArrayItem(dp, 1);
+            if (cJSON_IsNumber(i0) && cJSON_IsNumber(i1) && cJSON_IsNumber(i2)) {
+                meteo_dem_code = (int)i0->valuedouble;
+                meteo_dem_max = (float)i1->valuedouble;
+                meteo_dem_min = (float)i2->valuedouble;
+                meteo_dem_pluie = cJSON_IsNumber(i3) ? (int)i3->valuedouble : -1;
+                ESP_LOGI(TAG, "meteo demain : %.0f-%.0f C, code %d, pluie %d%%",
+                         (double)meteo_dem_min, (double)meteo_dem_max, meteo_dem_code, meteo_dem_pluie);
+            }
+        }
     }
     if (j) cJSON_Delete(j);
 }
@@ -7551,7 +7934,7 @@ static void mino_handle_line(const char *line)
 
     char dit[900], emo[32];
     ESP_LOGI(TAG, "reflexion...");
-    if (ds_chat(line, dit, sizeof(dit), emo, sizeof(emo)) == ESP_OK) {
+    if (ds_cerveau(line, dit, sizeof(dit), emo, sizeof(emo)) == ESP_OK) {
         int e = emo_by_name(emo);
         if (e < 0) e = art_expr_de_famille(8, 0);
         current_emotion = EXPR[e].famille;
@@ -7829,7 +8212,7 @@ static esp_err_t h_say(httpd_req_t *req)
     busy = true;
     int64_t t0 = esp_timer_get_time();
     char dit[900], emo[32];
-    esp_err_t err = ds_chat(q, dit, sizeof(dit), emo, sizeof(emo));
+    esp_err_t err = ds_cerveau(q, dit, sizeof(dit), emo, sizeof(emo));
     int64_t ms = (esp_timer_get_time() - t0) / 1000;
     busy = false;
 

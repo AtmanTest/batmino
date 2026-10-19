@@ -121,6 +121,35 @@ Tout se passe sur la carte, sans PC : micro -> WAV en PSRAM -> Groq
 
 Si le Wi-Fi manque, la carte le dit a l'ecran au lieu d'attendre.
 
+### Le cerveau (maj 2026-10-19)
+
+* Modele : **deepseek-flash** = DeepSeek V4.1 Flash (l'ancien `deepseek-chat`
+  donnait des reponses pauvres). Reglable par `/modele?m=deepseek-flash`.
+* Style : le prompt impose UNE phrase, 20 mots maximum, pas de politesses, pas
+  de rappel de la question, pas de description de soi. `max_tokens` 500.
+* Contexte injecte a chaque appel : date + heure en francais, meteo
+  maintenant, meteo de demain (min/max, pluie), et les 8 titres du moment
+  (franceinfo, rafraichis toutes les 30 min). Le modele ne repond donc plus
+  avec sa memoire d'entrainement quand on lui demande le jour ou l'actu.
+* Web : si le modele ne sait pas, il rend `{"cherche":"2 a 6 mots"}` ; la carte
+  interroge alors **Wikipedia** (`generator=search` + `extracts`, 2 articles)
+  et **Google News RSS** (4 titres, seulement si la question est une actu), puis
+  redemande une reponse courte avec ces resultats. Pas de cle d'API.
+  DuckDuckGo/Bing/Mojeek sont inutilisables depuis l'ESP (captcha/202).
+* Cout : ~2-4 s pour une question simple, ~10-20 s quand il faut chercher.
+* Echec de recherche : le modele repond quand meme en une phrase, il ne dit
+  plus "je ne trouve rien".
+
+### Wi-Fi : deux bugs corriges
+
+* Un mot de passe de 1 caractere etait enregistre en NVS (saisie ratee dans
+  `/reglages`) : le handshake echouait en boucle avec la raison 15. Un mot de
+  passe enregistre de moins de 8 caracteres est maintenant ignore.
+* `caca` (LAN isole, 192.168.1.x) passait en secours AVANT `MON_RESEAU_SECOURS_2` : le
+  robot y devenait injoignable depuis le PC. Il est desormais en dernier, et
+  on attend 2,5 s entre deux tentatives (la borne rejette les reconnexions
+  trop rapides).
+
 L'ancien cerveau PC (`mino-cerveau`) n'est plus necessaire ; s'il tourne encore
 il faut l'arreter, il tient le port serie :
 
@@ -174,8 +203,8 @@ commande part pendant le démarrage et personne ne répond.
 
 ## Ce qui reste
 
-* La WiFi ne s'accroche pas au réseau `MON_RESEAU_SECOURS` (le cerveau passe par
-  l'USB, donc la voix marche quand même) ; à revoir : SSID/mot de passe.
+* WiFi `MON_RESEAU_SECOURS` : corrige (mot de passe NVS pourri + ordre des
+  secours), le robot vit sur 192.168.8.x sans PC.
 * Le capteur de température lit la chaleur de la carte : le décalage
   (`offset`) est à refaire pour ce boîtier.
 * Pistes non faites : reconnaissance de mots pour réveiller sans bouton,

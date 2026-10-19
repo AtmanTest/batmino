@@ -68,7 +68,7 @@
    Utilise si aucune cle Groq n'est fournie : comme ca le robot parle
    des le premier flash, sans inscription. */
 #define DS_URL   "https://api.deepseek.com/chat/completions"
-#define DS_MODEL "deepseek-chat"
+#define DS_MODEL "deepseek-flash"   /* DeepSeek V4.1 Flash */
 
 /*---- voix de sortie : TTS de Google Traduction, gratuit et sans cle ----*/
 #define TTS_URL   "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=fr&q="
@@ -84,7 +84,8 @@
 #define METEO_LON   "2.4173"
 #define METEO_URL   "https://api.open-meteo.com/v1/forecast?latitude=" METEO_LAT \
                     "&longitude=" METEO_LON "&current=temperature_2m,weather_code" \
-                    "&timezone=Europe%2FParis"
+                    "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" \
+                    "&forecast_days=2&timezone=Europe%2FParis"
 #define METEO_PERIODE_S 900          /* rafraichie toutes les 15 min (Open-Meteo
                                         ne bouge pas plus vite) */
 
