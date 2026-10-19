@@ -213,7 +213,8 @@ depuis le demarrage, plus les seuils.
 
 La bande du bas (sous la ligne y=112) est reservee au rendez-vous :
 libelle (`PROCHAIN RDV`, ou `DANS n MIN` a moins de 90 min), puis
-`JEU 16:30` en corps 3, puis le titre en petit. Le nom de la borne wifi a
+`22 OCT 16:30` en corps 3 (le jour du mois, pas le nom du jour), puis le nom
+de la personne qui invite en petit. Le nom de la borne wifi a
 ete retire de l'accueil (il reste dans les reglages et dans `/state`) pour
 laisser la place. Le compagnon marche sous la ligne y=168, rayon 8.
 
@@ -423,6 +424,14 @@ voie Graph, gardee en secours.
 L'annonce vocale part une seule fois quand il reste <= 15 min (`voix_dit`), et
 l'accueil affiche `HH:MM titre` quand c'est <= 90 min. Les heures `TZID=UTC`
 sont converties (avant, elles etaient lues comme heure de Paris, 2 h de trop).
+
+**Qui invite** : le .ics publie n'a aucun champ `ORGANIZER`, le nom n'existe
+que dans le texte de l'invitation. `nom_invitant()` le retrouve dans le bloc
+de l'evenement, trois tournures : `Organisateur\nNom Prenom<mailto:...>`
+(Google), `Nom Prenom<mailto:...>- organisateur` (Outlook), `Nom Prenom vous
+invite` (Zoom). Il faut un prenom + un nom, une majuscule initiale, pas de
+`@` : sinon on garde le titre (un texte comme "je vous invite" est rejete).
+`/state` donne `cal_invitant`.
 
 Verifier de bout en bout sans internet : deposer un .ics sur la carte
 (`POST /fichier?p=/test.ics`) puis pointer `/ical?u=http://127.0.0.1/fichier?p=/test.ics`.

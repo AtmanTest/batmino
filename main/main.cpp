@@ -279,6 +279,7 @@ static char  wifi_actif[33] = "";   /* borne sur laquelle on est connecte */
 /* prochaine reunion du calendrier (rempli par ms_boucle, vide si rien) */
 static char  ms_heure[6] = "";
 static char  ms_titre[64] = "";
+static char  ms_org[48] = "";        /* la personne qui invite (lu dans le .ics) */
 static int   ms_dans = -1;          /* minutes avant le debut, -1 = rien */
 static long  ms_debut = 0;          /* instant du debut (epoch), 0 = rien */
 static void ical_charge(void);
@@ -1115,9 +1116,7 @@ static void dessine_rdv(void)
         long jours = (long)((minuit_local(ts) - minuit_local(time(NULL)) + 3600) / 86400);
         if (jours <= 0)       snprintf(quand, sizeof(quand), "AUJ. %s", ms_heure);
         else if (jours == 1)  snprintf(quand, sizeof(quand), "DEMAIN %s", ms_heure);
-        else if (jours <= 6)  snprintf(quand, sizeof(quand), "%s %s",
-                                       JOURS_COURT[te.tm_wday % 7], ms_heure);
-        else                  /* loin : le jour de la semaine ne suffit plus */
+        else                  /* la date, pas le nom du jour : "22 OCT 16:30" */
                               snprintf(quand, sizeof(quand), "%d %s %s",
                                        te.tm_mday, MOIS_COURT[te.tm_mon % 12], ms_heure);
     }
@@ -1130,7 +1129,8 @@ static void dessine_rdv(void)
     }
     if (dispo) {
         char titre[72];
-        snprintf(titre, sizeof(titre), "%.47s", ms_titre);
+        /* la personne qui invite plutot que l'intitule de la reunion */
+        snprintf(titre, sizeof(titre), "%.47s", ms_org[0] ? ms_org : ms_titre);
         a_text_c(100, 127, 3, quand);
         a_text_c(100, 148, 1, titre);
     } else {
@@ -4617,6 +4617,87 @@ static long decalage_local(void)
 }
 
 /* "20261018T143000" (heure locale), "20261018T123000Z" (UTC), "20261018" */
+/* ---------- qui invite ? ----------
+   Le .ics publie par Outlook ne contient AUCUN champ ORGANIZER : le nom de
+   l'organisateur n'existe que dans le texte de l'invitation. On le retrouve
+   donc dans le bloc de l'evenement, avec les deux tournures rencontrees :
+     "Organisateur\\nJeanne Lesbordes<mailto:...>"          (Google)
+     "Moussa BEN BALLA<mailto:...>- organisateur"          (Outlook)
+     "... Jeanne Lesbordes vous invite a une reunion Zoom" (Zoom)
+   A defaut, l'ecran garde le titre de l'evenement. */
+static const char *trouve_mot(const char *b, const char *fin, const char *mot)
+{
+    size_t l = strlen(mot);
+    for (const char *q = b; q + l <= fin; q++)
+        if (!memcmp(q, mot, l)) return q;
+    return NULL;
+}
+
+static bool nom_plausible(const char *s)
+{
+    int n = 0, esp = 0;
+    if (s[0] < 'A' || s[0] > 'Z') return false;    /* "je vous invite" -> rejete */
+    for (; s[n]; n++) {
+        unsigned char c = (unsigned char)s[n];
+        if (c < 0x20 || c == '@' || c == '<' || c == '>' || c == ':' || c == '/') return false;
+        if (c == ' ') esp++;
+    }
+    return n >= 4 && n <= 40 && esp >= 1;      /* un prenom + un nom */
+}
+
+static void copie_nom(const char *b, const char *e, char *out, size_t n)
+{
+    while (b < e && (*b == ' ' || *b == '\\' || *b == ':' || *b == '-' || *b == '.' ||
+                     *b == ',' || *b == '>')) b++;
+    while (e > b && (e[-1] == ' ' || e[-1] == '-' || e[-1] == '.' || e[-1] == ',' ||
+                     e[-1] == '(')) e--;
+    size_t l = (size_t)(e - b);
+    if (l >= n) l = n - 1;
+    memcpy(out, b, l);
+    out[l] = 0;
+}
+
+static bool nom_invitant(const char *b, const char *fin, char *out, size_t n)
+{
+    out[0] = 0;
+    const char *o = trouve_mot(b, fin, "rganisateur");     /* Organisateur / organisateur */
+    if (o) {
+        const char *lt = NULL;                              /* nom juste avant <mailto: */
+        for (const char *q = o; q > b && q > o - 140; q--)
+            if (q[-1] == '<') { lt = q - 1; break; }
+        if (lt) {
+            const char *s = lt;
+            while (s > b && lt - s < 50 && s[-1] != '>' && s[-1] != '\n' && s[-1] != '\r'
+                   && s[-1] != ',' && s[-1] != '\\' && (unsigned char)s[-1] < 0x80
+                   && !(s[-1] == 'n' && s > b + 1 && s[-2] == '\\'))
+                s--;
+            copie_nom(s, lt, out, n);
+            if (nom_plausible(out)) return true;
+        }
+        const char *s = o + 11;                             /* nom juste apres */
+        while (s < fin && (*s == ':' || *s == '\\' || *s == 'n' || *s == 'N' ||
+                           *s == ' ' || *s == '\r' || *s == '\n')) s++;
+        if (s < fin) {
+            const char *e = s;
+            while (e < fin && e - s < 40 && *e != '<' && *e != '\\' && *e != '\r'
+                   && *e != '\n' && *e != ':' && (unsigned char)*e < 0x80) e++;
+            copie_nom(s, e, out, n);
+            if (nom_plausible(out)) return true;
+        }
+    }
+    const char *v = trouve_mot(b, fin, "vous invite");
+    if (v) {
+        const char *s = v;
+        while (s > b && v - s < 60 && s[-1] != '\n' && s[-1] != '\r' && s[-1] != '\\'
+               && s[-1] != '>' && s[-1] != '<' && s[-1] != ':' && s[-1] != ','
+               && (unsigned char)s[-1] < 0x80)
+            s--;
+        copie_nom(s, v, out, n);
+        if (nom_plausible(out)) return true;
+    }
+    return false;
+}
+
 static long ical_epoch_tz(const char *v, bool utc)
 {
     int Y, M, D, h = 0, mi = 0, s = 0;
@@ -4710,6 +4791,7 @@ static void ical_interroge(void)
     long now = (long)time(NULL);
     long meilleur = 0;
     char meilleur_titre[64] = "";
+    char meilleur_org[48] = "";
 
     /* lignes repliees : une continuation commence par espace ou tabulation */
     char ligne[512];
@@ -4739,6 +4821,12 @@ static void ical_interroge(void)
                         meilleur = occ;
                         snprintf(meilleur_titre, sizeof(meilleur_titre), "%s",
                                  titre[0] ? titre : "reunion");
+                        /* le bloc complet, pour y chercher qui invite */
+                        const char *bd = buf;
+                        for (const char *q = p; q > buf; q--)
+                            if (q - buf >= 12 && !memcmp(q, "BEGIN:VEVENT", 12)) { bd = q; break; }
+                        if (!nom_invitant(bd, p, meilleur_org, sizeof(meilleur_org)))
+                            meilleur_org[0] = 0;
                     }
                     dans = false;
                 } else if (dans && !strncmp(ligne, "DTSTART", 7)) {
@@ -4767,18 +4855,20 @@ static void ical_interroge(void)
     }
     free(buf);
 
-    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0; ms_debut = 0;
+    ms_dans = -1; ms_heure[0] = 0; ms_titre[0] = 0; ms_debut = 0; ms_org[0] = 0;
     if (meilleur > 0) {
         struct tm e;
         time_t tt = (time_t)meilleur;
         localtime_r(&tt, &e);
         snprintf(ms_heure, sizeof(ms_heure), "%02d:%02d", e.tm_hour, e.tm_min);
         snprintf(ms_titre, sizeof(ms_titre), "%s", meilleur_titre);
+        snprintf(ms_org, sizeof(ms_org), "%s", meilleur_org);
         ms_dans = (int)((meilleur - now) / 60);
         ms_debut = meilleur;
         if (ms_dans < 0) ms_dans = 0;
     }
-    ESP_LOGI(TAG, "ical : prochain '%s' a %s dans %d min", ms_titre, ms_heure, ms_dans);
+    ESP_LOGI(TAG, "ical : prochain '%s' (invite par '%s') a %s dans %d min",
+             ms_titre, ms_org, ms_heure, ms_dans);
 }
 
 static int http_get(const char *url, const char *ua, uint8_t *buf, int cap);
@@ -4867,7 +4957,8 @@ static void ms_boucle(void)
     if (ms_dans >= 0 && ms_dans <= 15 && !ms_annonce) {
         ms_annonce = true;
         char phrase[128];
-        snprintf(phrase, sizeof(phrase), "Dans %d minutes, %s.", ms_dans, ms_titre);
+        snprintf(phrase, sizeof(phrase), "Dans %d minutes, rendez-vous avec %s.",
+                 ms_dans, ms_org[0] ? ms_org : ms_titre);
         voix_dit(phrase);
     }
     /* on rearme des que le rendez-vous sort de la fenetre, sinon l'annonce
@@ -7748,6 +7839,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddStringToObject(r, "cal_titre", ms_titre);
     cJSON_AddBoolToObject(r, "cal_ical", ical_url[0] != 0);
     cJSON_AddStringToObject(r, "cal_heure", ms_heure);
+    cJSON_AddStringToObject(r, "cal_invitant", ms_org);
     cJSON_AddNumberToObject(r, "cal_dans", ms_dans);
     cJSON_AddItemToObject(r, "boutons", btn_etat_json());
     cJSON_AddBoolToObject(r, "wifi_enregistre", wifi_rt ? 1 : 0);
