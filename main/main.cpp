@@ -272,9 +272,11 @@ static void draw_status_bar(void);
 #define PAGE_MAITRE 0
 /* deux pages seulement : l'accueil (ou vit la conversation) et le systeme */
 #define PAGE_SYS    1
-#define PAGE_REG    2
-#define PAGE_COUNT  3
-static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "SYSTEM", "REGLAGES"};
+#define PAGE_REG    2                     /* la page REGLAGES n'est plus dans le cycle
+                                             des boutons (jugee mal faite) : le code
+                                             reste, /reglages et /wifi aussi */
+#define PAGE_COUNT  2
+static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "SYSTEM"};
 
 /* ui_page / ui_face / menu_* : declares plus haut (pres de show_face) */
 static float ui_temp = 0.0f, ui_humi = 0.0f;
@@ -304,6 +306,9 @@ static void  ui_chime(void);
 /* audio : tampon mono 16 bits en PSRAM et aides, utilisees des le reveil */
 static uint8_t *rec_pcm = NULL;
 static volatile bool alarme_on = false;   /* la sonnerie du rendez-vous tourne */
+static bool veille_nuit = false;          /* mise en veille la nuit (22h-7h) : OFF par defaut */
+static bool voix_sortie = false;          /* HAUT-PARLEUR MUET : le robot ecrit, il ne parle pas */
+static int  voix_dit_nb = 0;              /* phrases produites (muettes ou non) */
 static int64_t alarme_t0 = 0;            /* quand elle a commence */
 static int     alarme_jouee = 0;         /* nombre de sonneries reellement jouees */
 static int  rec_last_bytes = 0;
@@ -3239,7 +3244,7 @@ static void pet_task(void *arg)
         struct tm ti;
         localtime_r(&now, &ti);
         xSemaphoreTake(pet_mux, portMAX_DELAY);
-        if (ti.tm_hour != derniere_nuit) {
+        if (veille_nuit && ti.tm_hour != derniere_nuit) {
             derniere_nuit = ti.tm_hour;
             pet_set_nuit(&pet, derniere_nuit >= 22 || derniere_nuit < 7, derniere_nuit);
         }
@@ -4040,9 +4045,19 @@ static esp_err_t http_evt(esp_http_client_event_t *e)
     return ESP_OK;
 }
 
-/* historique court, borne, en RAM (leger) */
+/* historique en PSRAM : 32 tours x 520 o = 16 Ko, ca ne tient pas en RAM
+   interne a cote du wifi. Allocation unique au demarrage, avec un secours
+   statique si la PSRAM manque (on ne perd pas la conversation pour autant). */
 #include "historique.h"
-static hist_t hist;                      /* conversation en cours (multi-tours) */
+static hist_t  hist_secours;             /* si la PSRAM refuse */
+static hist_t *hist_p = &hist_secours;
+#define hist (*hist_p)
+
+/* l'historique complet vit sur la carte SD, dans la partition brute (celle
+   qui fait 3,5 Mo/s, pas la FAT a 0,37 Mo/s). La fenetre RAM ci-dessus n'est
+   que ce qu'on renvoie au modele a chaque tour. */
+static void hist_sd_init(void);
+static void hist_sd_ajoute(const char *qui, const char *texte);
 
 /* "lundi 19 octobre 2026, 18h42" en heure locale */
 static void date_fr(char *out, size_t sz)
@@ -4136,7 +4151,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     const char *regle_web =
         (web_contexte && web_contexte[0] && web_contexte[0] != '(')
             ? "LA RECHERCHE EST DEJA FAITE (voir RESULTATS DE RECHERCHE WEB ci-dessus) : "
-              "tu ne cherches plus, tu reponds MAINTENANT en une phrase avec ces resultats.\n"
+              "tu ne cherches plus, tu reponds MAINTENANT, en deux phrases maximum, avec le "
+              "fait precis que ces resultats donnent.\n"
             : "";
     bool web_faite = (regle_web[0] != 0);
     /* Les regles changent selon la passe : quand la recherche est faite, on ne
@@ -4144,8 +4160,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     if (web_faite)
         snprintf(regles, 700,
                  "REGLES : les RESULTATS DE RECHERCHE WEB ci-dessus sont la seule verite. "
-                 "Je ne cherche plus rien. Je reponds la question posee, en une phrase, "
-                 "tiree de ces resultats.\n");
+                 "Je ne cherche plus rien. Je reponds la question posee, en deux phrases "
+                 "maximum, tiree de ces resultats.\n");
     else
         snprintf(regles, 700,
                  "REGLES : je ne raconte jamais ma vie, mes capacites, mes reglages. "
@@ -4178,11 +4194,13 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
              "%s"
              "%s"
              "%s"
-             "STYLE : une seule phrase, 20 mots maximum, tutoiement, pas de politesses, "
+             "STYLE : deux phrases maximum, 45 mots, tutoiement, pas de politesses, "
              "pas de rappel de la question, pas de liste, pas de conclusion. "
-             "Si un mot suffit, je donne un mot.\n"
+             "Une question de fait, d'actu ou d'explication : je donne la reponse complete "
+             "(le chiffre, le nom, la date) en une ou deux phrases. "
+             "Un ordre simple : une phrase courte, ou un mot.\n"
              "Reponds UNIQUEMENT par un objet JSON sur une seule ligne :\n"
-             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ma reponse, une phrase courte>\"%s}",
+             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ma reponse, courte et complete>\"%s}",
              soul_txt ? soul_txt : "",
              clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.",
              ctx,
@@ -4444,21 +4462,24 @@ static int rss_lire(const char *url, char *out, size_t sz, int max, bool avec_re
     return n;
 }
 
-/* Wikipedia : une seule requete qui rend l'intro des 2 meilleurs articles.
-   C'est la source fiable pour "qui est X", "c'est quoi Y", les dates. */
-static int wiki_lire(const char *requete, char *out, size_t sz)
+/* Wikipedia : une seule requete qui rend l'intro des 3 meilleurs articles.
+   C'est la source fiable pour "qui est X", "c'est quoi Y", les dates.
+   Si le wikipedia francais ne connait pas le sujet, on refait la meme requete
+   sur le wikipedia anglais : c'est la meme API, et la couverture y est bien
+   plus large (marques, films, personnalites etrangeres). */
+static int wiki_lire_lang(const char *hote, const char *requete, char *out, size_t sz)
 {
     out[0] = 0;
-    char q[220], url[420];
+    char q[220], url[460];
     url_enc(requete, q, sizeof(q));
     snprintf(url, sizeof(url),
-             "https://fr.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=%s"
-             "&gsrlimit=2&prop=extracts&exintro=1&explaintext=1&exsentences=2"
-             "&format=json&utf8=1", q);
-    uint8_t *page = (uint8_t *)heap_caps_malloc(24 * 1024, MALLOC_CAP_SPIRAM);
+             "https://%s.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=%s"
+             "&gsrlimit=3&prop=extracts&exintro=1&explaintext=1&exsentences=3"
+             "&format=json&utf8=1", hote, q);
+    uint8_t *page = (uint8_t *)heap_caps_malloc(28 * 1024, MALLOC_CAP_SPIRAM);
     if (!page) return 0;
-    int r = http_get(url, TTS_UA, page, 24 * 1024 - 1);
-    if (r <= 0) { free(page); ESP_LOGW(TAG, "wiki : lecture KO (%d)", r); return 0; }
+    int r = http_get(url, TTS_UA, page, 28 * 1024 - 1);
+    if (r <= 0) { free(page); ESP_LOGW(TAG, "wiki %s : lecture KO (%d)", hote, r); return 0; }
     page[r] = 0;
     cJSON *j = cJSON_Parse((char *)page);
     free(page);
@@ -4479,12 +4500,20 @@ static int wiki_lire(const char *requete, char *out, size_t sz)
         int w = snprintf(out + o, sz - o, "- %s : %.300s\n", jt->valuestring, txt);
         if (w <= 0) break;
         o += (size_t)w;
-        if (++n >= 2 || o + 340 >= sz) break;
+        if (++n >= 3 || o + 340 >= sz) break;
     }
     cJSON_Delete(j);
-    ESP_LOGI(TAG, "wiki : %d article(s) (%d o)", n, r);
+    ESP_LOGI(TAG, "wiki %s : %d article(s) (%d o)", hote, n, r);
     if (!n) out[0] = 0;
     return n;
+}
+
+/* francais d'abord, anglais si le francais ne trouve rien */
+static int wiki_lire(const char *requete, char *out, size_t sz)
+{
+    int n = wiki_lire_lang("fr", requete, out, sz);
+    if (n > 0) return n;
+    return wiki_lire_lang("en", requete, out, sz);
 }
 
 /* cherche : Wikipedia pour les faits, Google News pour l'actu du jour */
@@ -4509,7 +4538,7 @@ static int web_lire(const char *requete, char *out, size_t sz)
         url_enc(requete, q, sizeof(q));
         snprintf(url, sizeof(url),
                  "https://news.google.com/rss/search?q=%s&hl=fr&gl=FR&ceid=FR:fr", q);
-        n += rss_lire(url, out + o, sz - o, 4, false);
+        n += rss_lire(url, out + o, sz - o, 6, false);
     }
     ESP_LOGI(TAG, "web : %d sources pour '%.60s'", n, requete);
     return n;
@@ -4551,8 +4580,8 @@ static esp_err_t ds_cerveau(const char *user_text, char *out_dit, size_t dit_sz,
     }
 
     if (out_dit[0]) {
-        hist_ajoute(&hist, "MOI", user_text);
-        hist_ajoute(&hist, "MINO", out_dit);
+        hist_sd_ajoute("MOI", user_text);
+        hist_sd_ajoute("MINO", out_dit);
     }
     return ESP_OK;
 }
@@ -6202,6 +6231,12 @@ static tts_lot *tts_lance(tts_lot *L)
 static void tts_parle(const char *texte)
 {
     if (!texte || !*texte) return;
+    /* voix sortante coupee : le texte s'affiche a l'ecran, rien ne sort du
+       haut-parleur. /voix?o=1 la rallume si besoin. */
+    if (!voix_sortie) {
+        voix_dit_nb++;                       /* compteur : la phrase a bien ete produite */
+        return;
+    }
     if (radio_etat != 0) { radio_stop(); vTaskDelay(pdMS_TO_TICKS(120)); }
 
     tts_lot *lot = (tts_lot *)heap_caps_calloc(2, sizeof(tts_lot), MALLOC_CAP_SPIRAM);
@@ -6693,6 +6728,247 @@ static bool swap_lire(sdmmc_card_t *card, uint32_t lba_base, size_t offset,
         offset += plein; p += n; len -= n;
     }
     return ok;
+}
+
+/* ------------------------------------------------------------------ */
+/* Historique de conversation sur la partition brute (carte SD)        */
+/*                                                                     */
+/* Chaque message occupe UN secteur de 512 octets :                    */
+/*   [0] role (0 = MOI/Taz, 1 = MINO)  [1..2] longueur  [3..] texte    */
+/* Le secteur 0 de la partition porte l'en-tete (magic, ou ecrire,     */
+/* combien de messages). 4096 messages = 2 Mo, la zone en fait 24 Go.  */
+/* Aucune ecriture FAT : c'est la zone brute, 10x plus rapide.         */
+/* ------------------------------------------------------------------ */
+#define HIST_SD_MAGIC 0x4D494E4Fu          /* "MINO" */
+#define HIST_SD_SLOTS 4096
+#define HIST_SD_TXT   508
+
+typedef struct {
+    uint32_t magic;
+    uint16_t next;                         /* index du prochain message */
+    uint16_t n;                            /* messages valides (<= SLOTS) */
+    uint32_t tours;                        /* compteur absolu, jamais remis a 0 */
+} hist_sd_entete_t;
+
+static bool          hist_sd_pret = false;
+static uint32_t      hist_sd_base = 0;
+static uint16_t      hist_sd_next = 0;
+static uint16_t      hist_sd_n = 0;
+static uint32_t      hist_sd_tours = 0;
+static int           hist_sd_erreurs = 0;
+static SemaphoreHandle_t hist_sd_mux = NULL;
+static uint8_t      *hist_sd_sect = NULL;   /* 512 o, tampon DMA */
+static char          hist_sd_pourquoi[40] = "pas encore initialise";
+
+static void hist_sd_ecrit_entete(void)
+{
+    if (!hist_sd_pret || !hist_sd_sect) return;
+    hist_sd_entete_t e = { HIST_SD_MAGIC, hist_sd_next, hist_sd_n, hist_sd_tours };
+    memset(hist_sd_sect, 0, 512);
+    memcpy(hist_sd_sect, &e, sizeof(e));
+    if (sdmmc_write_sectors(sd_card, hist_sd_sect, hist_sd_base, 1) != ESP_OK) {
+        hist_sd_erreurs++;
+        ESP_LOGW(TAG, "historique : en-tete non ecrit");
+    }
+}
+
+static void hist_sd_relit_fenetre(void)
+{
+    /* on remet les HIST_MAX derniers messages dans la fenetre RAM pour que le
+       modele reprenne le fil apres un redemarrage */
+    hist_vide(hist_p);
+    if (!hist_sd_pret || hist_sd_n == 0) return;
+    int garde = hist_sd_n < HIST_MAX ? hist_sd_n : HIST_MAX;
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(512, MALLOC_CAP_DMA);
+    if (!buf) return;
+    for (int k = garde; k > 0; k--) {
+        int idx = (int)hist_sd_next - k;
+        while (idx < 0) idx += HIST_SD_SLOTS;
+        if (sdmmc_read_sectors(sd_card, buf, hist_sd_base + 1 + (uint32_t)idx, 1) != ESP_OK) continue;
+        uint16_t len = (uint16_t)(buf[1] | (buf[2] << 8));
+        if (len == 0 || len > HIST_SD_TXT) continue;
+        char txt[HIST_SD_TXT + 1];
+        memcpy(txt, buf + 3, len);
+        txt[len] = 0;
+        hist_ajoute(hist_p, buf[0] ? "MINO" : "MOI", txt);
+    }
+    free(buf);
+}
+
+static void hist_sd_init(void)
+{
+    if (!sd_ok || !sd_card) {
+        snprintf(hist_sd_pourquoi, sizeof(hist_sd_pourquoi), "pas de carte");
+        ESP_LOGW(TAG, "historique : pas de carte, il reste en RAM");
+        return;
+    }
+    part_lire_mbr(sd_card);
+    if (part_n < 2) {
+        snprintf(hist_sd_pourquoi, sizeof(hist_sd_pourquoi), "1 seule partition (%d)", part_n);
+        ESP_LOGW(TAG, "historique : pas de partition brute (/part?op=repart)");
+        return;
+    }
+    hist_sd_base = part_info[1][0];
+    if (!hist_sd_mux) hist_sd_mux = xSemaphoreCreateMutex();
+    hist_sd_sect = (uint8_t *)heap_caps_aligned_alloc(512, 512, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!hist_sd_sect) hist_sd_sect = (uint8_t *)heap_caps_aligned_alloc(512, 512, MALLOC_CAP_SPIRAM);
+    if (!hist_sd_sect) {
+        snprintf(hist_sd_pourquoi, sizeof(hist_sd_pourquoi), "pas de tampon DMA");
+        ESP_LOGW(TAG, "historique : pas de tampon");
+        return;
+    }
+
+    hist_sd_entete_t e;
+    memset(&e, 0, sizeof(e));
+    if (sdmmc_read_sectors(sd_card, hist_sd_sect, hist_sd_base, 1) == ESP_OK)
+        memcpy(&e, hist_sd_sect, sizeof(e));
+    if (e.magic != HIST_SD_MAGIC || e.next >= HIST_SD_SLOTS || e.n > HIST_SD_SLOTS) {
+        ESP_LOGW(TAG, "historique : zone brute vierge, je l'initialise");
+        hist_sd_next = 0; hist_sd_n = 0; hist_sd_tours = 0;
+        hist_sd_pret = true;
+        hist_sd_ecrit_entete();
+    } else {
+        hist_sd_next = e.next; hist_sd_n = e.n; hist_sd_tours = e.tours;
+        hist_sd_pret = true;
+    }
+    snprintf(hist_sd_pourquoi, sizeof(hist_sd_pourquoi), "ok LBA %lu",
+             (unsigned long)hist_sd_base);
+    hist_sd_relit_fenetre();
+    ESP_LOGI(TAG, "historique : %u message(s) sur la carte (base LBA %lu), %d relus",
+             (unsigned)hist_sd_n, (unsigned long)hist_sd_base, hist.n);
+}
+
+static void hist_sd_ajoute(const char *qui, const char *texte)
+{
+    if (!texte || !*texte) return;
+    hist_ajoute(hist_p, qui, texte);          /* fenetre RAM : le modele la lit */
+    if (!hist_sd_pret || !hist_sd_sect) return;
+    if (hist_sd_mux) xSemaphoreTake(hist_sd_mux, portMAX_DELAY);
+    bool mino = (qui && strcmp(qui, "MINO") == 0);
+    uint16_t len = (uint16_t)strlen(texte);
+    if (len > HIST_SD_TXT) len = HIST_SD_TXT;
+    memset(hist_sd_sect, 0, 512);
+    hist_sd_sect[0] = mino ? 1 : 0;
+    hist_sd_sect[1] = (uint8_t)(len & 0xff);
+    hist_sd_sect[2] = (uint8_t)(len >> 8);
+    memcpy(hist_sd_sect + 3, texte, len);
+    if (sdmmc_write_sectors(sd_card, hist_sd_sect, hist_sd_base + 1 + hist_sd_next, 1) != ESP_OK) {
+        hist_sd_erreurs++;
+        ESP_LOGW(TAG, "historique : ecriture message KO");
+    } else {
+        hist_sd_next = (uint16_t)((hist_sd_next + 1) % HIST_SD_SLOTS);
+        if (hist_sd_n < HIST_SD_SLOTS) hist_sd_n++;
+        hist_sd_tours++;
+        hist_sd_ecrit_entete();
+    }
+    if (hist_sd_mux) xSemaphoreGive(hist_sd_mux);
+}
+
+/* relit les `max` derniers messages pour /hist (preuve et relecture) */
+static int hist_sd_lire(char *out, size_t sz, int max)
+{
+    out[0] = 0;
+    if (!hist_sd_pret || !hist_sd_sect) return 0;
+    if (max <= 0 || max > hist_sd_n) max = hist_sd_n;
+    if (hist_sd_mux) xSemaphoreTake(hist_sd_mux, portMAX_DELAY);
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(512, MALLOC_CAP_DMA);
+    int n = 0;
+    size_t o = 0;
+    for (int k = max; k > 0 && buf && o + 300 < sz; k--) {
+        int idx = (int)hist_sd_next - k;
+        while (idx < 0) idx += HIST_SD_SLOTS;
+        if (sdmmc_read_sectors(sd_card, buf, hist_sd_base + 1 + (uint32_t)idx, 1) != ESP_OK) continue;
+        uint16_t len = (uint16_t)(buf[1] | (buf[2] << 8));
+        if (len == 0 || len > HIST_SD_TXT) continue;
+        char txt[HIST_SD_TXT + 1];
+        memcpy(txt, buf + 3, len);
+        txt[len] = 0;
+        for (char *p = txt; *p; p++) if (*p == '"' || *p == '\\' || *p < 32) *p = ' ';
+        int w = snprintf(out + o, sz - o, "\"t%lu\":{\"q\":\"%s\",\"m\":\"%.250s\"}\n",
+                         (unsigned long)(hist_sd_tours > 0 ? hist_sd_tours - k + 1 : 0),
+                         buf[0] ? "MINO" : "MOI", txt);
+        if (w <= 0) break;
+        o += (size_t)w;
+        n++;
+    }
+    if (buf) free(buf);
+    if (hist_sd_mux) xSemaphoreGive(hist_sd_mux);
+    return n;
+}
+
+/* /hist?n=40 : relit les derniers messages stockes sur la carte SD */
+static esp_err_t h_hist(httpd_req_t *req)
+{
+    char v[16] = "";
+    int n = 40;
+    if (qval(req, "n", v, sizeof(v)) == ESP_OK && v[0]) n = atoi(v);
+    if (n <= 0 || n > 200) n = 40;
+    size_t sz = 24 * 1024;
+    char *out = (char *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+    if (!out) { httpd_resp_send_500(req); return ESP_OK; }
+    int k = hist_sd_lire(out, sz - 300, n);
+    char entete[200];
+    snprintf(entete, sizeof(entete),
+             "{\"ok\":true,\"sd\":%s,\"total\":%u,\"tours\":%u,\"rendus\":%d,\"messages\":{",
+             hist_sd_pret ? "true" : "false", (unsigned)hist_sd_n,
+             (unsigned)hist_sd_tours, k);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr_chunk(req, entete);
+    httpd_resp_sendstr_chunk(req, k > 0 ? out : "");
+    httpd_resp_sendstr_chunk(req, "}}");
+    httpd_resp_sendstr_chunk(req, NULL);
+    free(out);
+    return ESP_OK;
+}
+
+
+
+/* /veille?o=0|1 : mise en veille automatique la nuit (22h-7h).
+   OFF par defaut : le robot reste eveille et repond a toute heure. */
+static esp_err_t h_veille(httpd_req_t *req)
+{
+    char v[8] = "";
+    if (qval(req, "o", v, sizeof(v)) == ESP_OK && v[0]) {
+        veille_nuit = (v[0] == '1');
+        if (!veille_nuit) {                    /* on le reveille tout de suite */
+            xSemaphoreTake(pet_mux, portMAX_DELAY);
+            pet.endormi = 0;
+            xSemaphoreGive(pet_mux);
+        }
+        nvs_handle_t nh;
+        if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_set_i32(nh, "veille", veille_nuit ? 1 : 0);
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
+        show_ui();
+    }
+    char r[80];
+    snprintf(r, sizeof(r), "{\"veille\":%s}", veille_nuit ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, r);
+    return ESP_OK;
+}
+
+/* /voix?o=0|1 : sortie haut-parleur. 0 (defaut) = le robot ecrit seulement. */
+static esp_err_t h_voix_off(httpd_req_t *req)
+{
+    char v[8] = "";
+    if (qval(req, "o", v, sizeof(v)) == ESP_OK && v[0]) {
+        voix_sortie = (v[0] == '1');
+        nvs_handle_t nh;
+        if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_set_i32(nh, "voixsortie", voix_sortie ? 1 : 0);
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
+    }
+    char r[96];
+    snprintf(r, sizeof(r), "{\"voix\":%s,\"phrases\":%d}",
+             voix_sortie ? "true" : "false", voix_dit_nb);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, r);
+    return ESP_OK;
 }
 
 /* /part                       -> etat des partitions
@@ -8384,6 +8660,15 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(r, "heap_libre", (double)esp_get_free_heap_size());
     cJSON_AddNumberToObject(r, "historique_tours", (double)hist.n);
+    cJSON_AddBoolToObject(r, "hist_sd", hist_sd_pret);
+    cJSON_AddNumberToObject(r, "hist_sd_n", (double)hist_sd_n);
+    cJSON_AddNumberToObject(r, "hist_sd_tours", (double)hist_sd_tours);
+    cJSON_AddNumberToObject(r, "hist_sd_base", (double)hist_sd_base);
+    cJSON_AddNumberToObject(r, "hist_sd_ko", (double)hist_sd_erreurs);
+    cJSON_AddBoolToObject(r, "veille_nuit", veille_nuit);
+    cJSON_AddStringToObject(r, "hist_sd_etat", hist_sd_pourquoi);
+    cJSON_AddBoolToObject(r, "voix_sortie", voix_sortie);
+    cJSON_AddNumberToObject(r, "voix_dit_nb", (double)voix_dit_nb);
     cJSON_AddNumberToObject(r, "heap_interne_max", (double)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(r, "heap_dma", (double)heap_caps_get_free_size(MALLOC_CAP_DMA));
     cJSON_AddNumberToObject(r, "reset", (double)esp_reset_reason());
@@ -8690,6 +8975,9 @@ static void api_start(void)
     u.handler = h_alarme; u.uri = "/alarme"; httpd_register_uri_handler(srv, &u);
     u.handler = h_parle; u.uri = "/parle"; httpd_register_uri_handler(srv, &u);
     u.handler = h_dit;   u.uri = "/dit";   httpd_register_uri_handler(srv, &u);
+    u.handler = h_hist;  u.uri = "/hist";  httpd_register_uri_handler(srv, &u);
+    u.handler = h_veille; u.uri = "/veille"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_voix_off; u.uri = "/voix"; httpd_register_uri_handler(srv, &u);
     u.handler = h_ecran; u.uri = "/ecran"; httpd_register_uri_handler(srv, &u);
     u.handler = h_fichier; u.uri = "/fichier"; httpd_register_uri_handler(srv, &u);
     u.method = HTTP_POST;
@@ -8725,12 +9013,25 @@ extern "C" void app_main(void)
         int32_t v = 0;
         if (nvs_open("mino", NVS_READONLY, &nh) == ESP_OK) {
             if (nvs_get_i32(nh, "toff10", &v) == ESP_OK) ui_temp_offset = (float)v / 10.0f;
+            if (nvs_get_i32(nh, "veille", &v) == ESP_OK) veille_nuit = (v != 0);
+            if (nvs_get_i32(nh, "voixsortie", &v) == ESP_OK) voix_sortie = (v != 0);
             nvs_close(nh);
         }
     }
     ESP_LOGI(TAG, "Mino demarre");
 
     storage_init();
+
+    /* l'historique de conversation vit en PSRAM (16 Ko) : le garder en RAM
+       interne affamait le wifi. Si l'allocation echoue, on reste sur le
+       tampon statique, plus court mais fonctionnel. */
+    {
+        hist_t *h = (hist_t *)heap_caps_calloc(1, sizeof(hist_t), MALLOC_CAP_SPIRAM);
+        if (h) hist_p = h;
+        hist_vide(hist_p);
+        ESP_LOGI(TAG, "historique : fenetre de %d tours de %d o (%s)",
+                 HIST_MAX, HIST_TXT_SZ, h ? "PSRAM" : "RAM interne");
+    }
 
     /* ecran + capteurs : TOUS les rails d'alimentation avant l'I2C,
        sinon le controleur tactile (0x38) ne repond jamais sur le bus. */
@@ -8783,6 +9084,7 @@ extern "C" void app_main(void)
     if (sd_ok) {
         storage_sd_charge();
         ESP_LOGI(TAG, "carte SD prete : /sdcard/mino pour le journal, la memoire et le SOUL");
+        hist_sd_init();      /* tout l'historique de conversation, sur la partition brute */
     }
     radios_charge();
     radio_vol_charge();

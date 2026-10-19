@@ -6,8 +6,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#define HIST_MAX      12   /* nombre de tours gardes */
-#define HIST_TXT_SZ  320   /* octets par tour */
+#define HIST_MAX      32   /* nombre de tours gardes (2x plus qu'avant : le fil tient) */
+#define HIST_TXT_SZ  512   /* octets par tour */
 #define HIST_QUI_SZ    8
 
 typedef struct {
