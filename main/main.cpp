@@ -313,7 +313,7 @@ static SemaphoreHandle_t pet_mux = NULL;
 static int anim_ph = 0;                  /* etape du petit compagnon (il bouge) */
 
 /* Mino se promene : il vise un coin de la zone blanche et y va pas a pas */
-static int kirby_x = 100, kirby_y = 148;     /* ou il est */
+static int kirby_x = 100, kirby_y = 189;     /* ou il est (bande du bas) */
 static int kirby_vx = 0, kirby_vy = 0;       /* ou il veut aller */
 
 static int conso_mw(void);   /* definie plus bas (elle lit la radio et la voix) */
@@ -950,10 +950,24 @@ static void infos_nettoie(char *s)
         if (q[0] == ' ' && q[1] == ' ') { memmove(q, q + 1, strlen(q)); q--; }
 }
 
+/* texte "gras" : la meme chaine dessinee deux fois, decalee d'un pixel.
+   La police 3x5 n'a pas de graisse ; sur une dalle 1 bit c'est le seul
+   moyen d'epaissir un mot sans changer de corps. */
+static void a_text_gras(int x, int y, int s, const char *str)
+{
+    a_text_col(x, y, s, str, 1);
+    a_text_col(x + 1, y, s, str, 1);
+}
+
+static void a_text_c_gras(int cx, int y, int s, const char *str)
+{
+    a_text_gras(cx - a_text_w(s, str) / 2, y, s, str);
+}
+
 /* un pas vers la destination ; arrive, il en choisit une autre au hasard */
 static void kirby_promene(void)
 {
-    int x0 = 22, x1 = 178, y0 = 176, y1 = 187;   /* la bande du bas, sous le rendez-vous */
+    int x0 = 22, x1 = 178, y0 = 186, y1 = 192;   /* la bande du bas, sous le cadre */
     if ((kirby_vx == 0 && kirby_vy == 0) || (kirby_x == kirby_vx && kirby_y == kirby_vy)) {
         kirby_vx = x0 + (int)(esp_random() % (uint32_t)(x1 - x0 + 1));
         kirby_vy = y0 + (int)(esp_random() % (uint32_t)(y1 - y0 + 1));
@@ -1123,18 +1137,35 @@ static void dessine_rdv(void)
     if (dispo && ms_dans >= 0 && ms_dans <= 90) {
         char lab[24];
         snprintf(lab, sizeof(lab), "DANS %d MIN", ms_dans);
-        a_text_c(100, 118, 1, lab);
+        a_text_c_gras(100, 104, 2, lab);
     } else {
-        a_text_c(100, 118, 1, "PROCHAIN RDV");
+        a_text_c_gras(100, 104, 2, "PROCHAIN RDV");
     }
     if (dispo) {
-        char titre[72];
-        /* la personne qui invite plutot que l'intitule de la reunion */
-        snprintf(titre, sizeof(titre), "%.47s", ms_org[0] ? ms_org : ms_titre);
-        a_text_c(100, 127, 3, quand);
-        a_text_c(100, 148, 1, titre);
+        /* la personne qui invite, en gros : c'est ce qu'on veut lire d'un
+           coup d'oeil. 14 signes tiennent en corps 3 dans le cadre ; au-dela
+           on coupe au dernier espace et on ecrit sur deux lignes, ce qui est
+           plus lisible qu'un nom retreci. */
+        const char *nom = ms_org[0] ? ms_org : ms_titre;
+        a_text_c_gras(100, 118, 3, quand);
+        if (strlen(nom) <= 14) {
+            a_text_c_gras(100, 137, 3, nom);
+        } else {
+            char l1[32], l2[32];
+            const char *sp = strrchr(nom, ' ');
+            if (sp && (size_t)(sp - nom) <= 14 && strlen(sp + 1) <= 14) {
+                snprintf(l1, sizeof(l1), "%.*s", (int)(sp - nom), nom);
+                snprintf(l2, sizeof(l2), "%s", sp + 1);
+                a_text_c_gras(100, 137, 3, l1);
+                a_text_c_gras(100, 154, 3, l2);
+            } else {
+                char court[32];
+                snprintf(court, sizeof(court), "%.21s", nom);   /* 21 signes = 165 px */
+                a_text_c_gras(100, 137, 2, court);
+            }
+        }
     } else {
-        a_text_c(100, 130, 2, "AUCUN");
+        a_text_c_gras(100, 126, 3, "AUCUN");
     }
 }
 
@@ -1191,11 +1222,18 @@ static void draw_app_maitre(void)
     a_text_c(100, 4, 7, b);
     icon_wifi(183, 12, ui_wifi_ok ? 1 : 0);
 
-    /* la date, en corps 2 (le nom de la borne wifi vit dans les reglages) */
-    snprintf(b, sizeof(b), "%s %d %s", JOURS_SEM[ti.tm_wday % 7], ti.tm_mday,
-             MOIS_AN[ti.tm_mon % 12]);
-    a_text_c(100, 44, 2, b);
-    a_hline(6, 193, 60, 1);
+    /* la date : le jour en gras, en corps 3, et le mois abrege pour que ca
+       tienne toujours (MERCREDI 30 SEP = 15 signes = 177 px) */
+    {
+        char jour[16], reste[24];
+        snprintf(jour, sizeof(jour), "%s", JOURS_SEM[ti.tm_wday % 7]);
+        snprintf(reste, sizeof(reste), "%d %s", ti.tm_mday, MOIS_COURT[ti.tm_mon % 12]);
+        int w1 = a_text_w(3, jour), w2 = a_text_w(3, reste);
+        int x = 100 - (w1 + 12 + w2) / 2;
+        a_text_gras(x, 46, 3, jour);
+        a_text(x + w1 + 12, 46, 3, reste);
+    }
+    a_hline(6, 193, 64, 1);
 
     if (voix_etat != 0) {
         /* Laura est la : son compagnon passe au premier plan, en grand, et sa
@@ -1212,30 +1250,32 @@ static void draw_app_maitre(void)
         return;
     }
 
-    /* la meteo du jour */
-    ic_temp(20, 74);
-    if (meteo_ok) {
-        snprintf(b, sizeof(b), "%.1f", (double)meteo_temp);
-        a_text(34, 66, 3, b);
-        a_text(34 + a_text_w(3, b) + 4, 66, 3, "C");
-    } else {
-        a_text(34, 66, 3, "--");
+    /* la meteo du jour, sur une seule ligne : icone, 8.0C, NUAGEUX */
+    {
+        char m[64];
+        if (meteo_ok) snprintf(b, sizeof(b), "%.1fC", (double)meteo_temp);
+        else          snprintf(b, sizeof(b), "--");
+        snprintf(m, sizeof(m), "%.12s %s", b, meteo_texte(meteo_code));
+        int w = a_text_w(3, m);
+        int x = 100 - (w + 18) / 2;          /* 12 px d'icone + 6 d'ecart */
+        ic_temp(x + 6, 77);
+        a_text(x + 18, 70, 3, m);
     }
-    /* ce qu'il consomme, aligne a droite de la temperature */
-    snprintf(b, sizeof(b), "%.1f W", conso_mw() / 1000.0);
-    a_text(196 - a_text_w(1, b), 68, 1, b);
+    /* la ville en gras a gauche, la borne wifi en petit a droite : deux
+       reperes utiles (ou je suis, sur quoi je suis connecte) */
+    a_text_gras(8, 87, 2, METEO_VILLE);
+    if (wifi_actif[0])
+        a_text(192 - a_text_w(2, wifi_actif), 86, 2, wifi_actif);
 
-    a_text_c(100, 88, 2, meteo_texte(meteo_code));
-    a_text_c(100, 102, 1, METEO_VILLE);
-    a_hline(6, 193, 112, 1);
-
-    /* ------ prochain rendez-vous : toujours au meme endroit ------ */
+    /* ------ prochain rendez-vous, dans un cadre fin ------ */
+    a_hline(8, 192, 100, 1);
+    a_hline(8, 192, 180, 1);
+    a_vline(8, 100, 180, 1);
+    a_vline(192, 100, 180, 1);
     dessine_rdv();
 
-    /* le petit compagnon se promene dans la bande du bas (tache promenade) */
-    draw_kirby(kirby_x, kirby_y, 8, anim_ph, kirby_etat());
-
-    a_hline(6, 193, 196, 1);
+    /* le petit compagnon se promene sous le cadre (tache promenade) */
+    draw_kirby(kirby_x, kirby_y, 4, anim_ph, kirby_etat());
 }
 
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */

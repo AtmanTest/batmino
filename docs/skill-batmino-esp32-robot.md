@@ -442,3 +442,30 @@ Verifier de bout en bout sans internet : deposer un .ics sur la carte
         write_flash 0x10000 build/mino.bin
 
 Verifier au serie : `mino: SOUL lu sur la carte SD`, `carte SD prete : /sdcard/mino`.
+
+## Accueil Mino : la mise en page (200x200)
+
+Hierarchie verticale, en haut ce qui se lit de loin, en bas ce qui se consulte :
+
+    4..39   heure, corps 7
+    46..61  date, corps 3, nom du jour en gras, mois abrege (MERCREDI 30 SEP = 177 px)
+    64      filet
+    70..85  meteo sur UNE ligne : icone + "8.0C NUAGEUX" (corps 3, centre ensemble)
+    86..96  ville en gras a gauche, nom de la borne wifi a droite (corps 2)
+    100..180 cadre fin (1 px) autour du rendez-vous
+            104 label corps 2 gras ("PROCHAIN RDV" ou "DANS n MIN")
+            118 date + heure corps 3 gras
+            137 nom de l'invitant corps 3 gras (2 lignes coupees au dernier
+                espace si plus de 14 signes)
+    186..192 le compagnon se promene dans la bande libre
+
+Regles de dessin apprises ici :
+
+- La police 3x5 n'a pas de graisse : `a_text_gras()` dessine deux fois a
+  1 px d'ecart. Ca reste lisible a partir de s=2 (3 px de trait, 2 px de
+  blanc) ; a s=1 les lettres se collent, ne jamais graisser du corps 1.
+- Toujours calculer la largeur avec `a_text_w()` avant de centrer : 12 px
+  par signe en corps 3, 8 px en corps 2, 4 px en corps 1. Au-dela de 14
+  signes en corps 3, ca sort du cadre : couper au dernier espace.
+- Le compagnon doit etre dessine dans une bande qui ne contient aucun texte,
+  sinon il passe par-dessus les noms pendant sa promenade.
