@@ -1137,9 +1137,9 @@ static void dessine_rdv(void)
     if (dispo && ms_dans >= 0 && ms_dans <= 90) {
         char lab[24];
         snprintf(lab, sizeof(lab), "DANS %d MIN", ms_dans);
-        a_text_c_gras(100, 104, 2, lab);
+        a_text_c_gras(100, 107, 2, lab);
     } else {
-        a_text_c_gras(100, 104, 2, "PROCHAIN RDV");
+        a_text_c_gras(100, 107, 2, "PROCHAIN RDV");
     }
     if (dispo) {
         /* la personne qui invite, en gros : c'est ce qu'on veut lire d'un
@@ -1147,25 +1147,25 @@ static void dessine_rdv(void)
            on coupe au dernier espace et on ecrit sur deux lignes, ce qui est
            plus lisible qu'un nom retreci. */
         const char *nom = ms_org[0] ? ms_org : ms_titre;
-        a_text_c_gras(100, 118, 3, quand);
+        a_text_c_gras(100, 121, 3, quand);
         if (strlen(nom) <= 14) {
-            a_text_c_gras(100, 137, 3, nom);
+            a_text_c_gras(100, 140, 3, nom);
         } else {
             char l1[32], l2[32];
             const char *sp = strrchr(nom, ' ');
             if (sp && (size_t)(sp - nom) <= 14 && strlen(sp + 1) <= 14) {
                 snprintf(l1, sizeof(l1), "%.*s", (int)(sp - nom), nom);
                 snprintf(l2, sizeof(l2), "%s", sp + 1);
-                a_text_c_gras(100, 137, 3, l1);
-                a_text_c_gras(100, 154, 3, l2);
+                a_text_c_gras(100, 140, 3, l1);
+                a_text_c_gras(100, 157, 3, l2);
             } else {
                 char court[32];
                 snprintf(court, sizeof(court), "%.21s", nom);   /* 21 signes = 165 px */
-                a_text_c_gras(100, 137, 2, court);
+                a_text_c_gras(100, 140, 2, court);
             }
         }
     } else {
-        a_text_c_gras(100, 126, 3, "AUCUN");
+        a_text_c_gras(100, 129, 3, "AUCUN");
     }
 }
 
