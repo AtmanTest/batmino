@@ -250,6 +250,38 @@ static int   contexte_hist_octets = 0; /* octets d'historique reellement envoyes
 static void date_fr(char *out, size_t sz);
 /* la meteo et la voix : definies plus bas, utilisees par la page maitre */
 static volatile bool meteo_ok;
+/* ---- cycle de vie des applis (une appli par page) ----
+   La memoire de travail d'une appli n'existe que tant qu'elle est au premier
+   plan : en entrant on alloue, en sortant on rend tout. Seuls le wifi, la
+   synchro de l'heure, les boutons, l'ecran, les rappels et l'assistant sont
+   vitaux et ne s'arreteent jamais. */
+static char  *meteo_buf = NULL;      /* corps de la reponse meteo (PSRAM, alloue une fois) */
+static size_t meteo_buf_taille = 0;
+static int    page_app = -1;         /* appli au premier plan */
+static int    app_mem_octets = 0;    /* octets qu'elle occupe */
+static volatile bool meteo_force = false;  /* la page METEO vient de s'ouvrir */
+/* ---- appli YOUTUBE : la chaine de l'utilisateur et sa derniere video ----
+   Le nom de la chaine se regle une fois (console `yt @moncompte` ou /yt?c=),
+   il est garde en NVS ; la page lit ensuite le flux RSS de la chaine. */
+static char  yt_handle[40] = "";     /* @moncompte */
+static char  yt_id[32] = "";         /* UC... (resolu une fois) */
+static char  yt_nom[48] = "";        /* nom affiche de la chaine */
+static char  yt_titre[96] = "";      /* derniere video */
+static char  yt_age[24] = "";        /* "il y a 2 j" */
+static int   yt_vues = -1;
+static volatile bool yt_ok = false;
+static volatile bool yt_force = false;
+static char *yt_buf = NULL;          /* page de la chaine, en PSRAM, rendue en sortant */
+static size_t yt_buf_taille = 0;
+static volatile bool yt_en_cours = false;   /* lecture en cours dans la tache reseau */
+static volatile bool yt_a_liberer = false;  /* page quittee pendant la lecture */
+/* la page YouTube fait ~2 Mo et la video mise en avant arrive vers 800 Ko :
+   d'ou ce gros tampon, en PSRAM, rendu des qu'on quitte la page */
+#define YT_TAILLE (1536 * 1024)
+#define YT_UA "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " \
+              "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+#define YT_COOKIE "CONSENT=YES+cb; SOCS=CAI"
+static void yt_lire(void);
 static float meteo_temp;
 static int   meteo_code;
 /* demain : pour repondre a "quel temps demain" sans passer par le web */
@@ -279,10 +311,12 @@ static void draw_status_bar(void);
 #define PAGE_TIMER  2                     /* RAPPELS  : les minuteurs et rappels en cours */
 #define PAGE_SYS    3                     /* SYSTEM   : cpu, ram, watts, reseau, stockage */
 #define PAGE_HIST   4                     /* HISTORIQUE : les derniers echanges */
-#define PAGE_REG    5                     /* REGLAGES : hors cycle (jugee mal faite),
+#define PAGE_YT     5                     /* YOUTUBE  : la chaine, derniere video */
+#define PAGE_REG    6                     /* REGLAGES : hors cycle (jugee mal faite),
                                              joignable par /reglages et le web */
-#define PAGE_COUNT  5
-static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "RAPPELS", "SYSTEM", "HISTORIQUE"};
+#define PAGE_COUNT  6
+static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "RAPPELS", "SYSTEM",
+                                           "HISTORIQUE", "YOUTUBE"};
 
 /* defilement de la page HISTORIQUE : nombre de messages remontes dans le passe */
 static int hist_vue = 0;
@@ -365,6 +399,11 @@ static int  hist_sd_cherche(const char *mots, char *out, size_t sz, int max);
 /* etat partage : page courante, tamagotchi, carte SD.
    Declares ici car les pages, le journal et le moteur les lisent de partout. */
 static int   ui_page = 0;
+/* une image demandee mais sautee (mutex ou dalle occupee) : sans ce drapeau un
+   changement de page pendant un rafraichissement restait invisible jusqu'au
+   tick suivant (une minute) -> "impossible de changer d'app, ca reste fige" */
+static volatile bool redraw_demande = false;
+static uint32_t boot_nb = 0;       /* numero de demarrage (NVS), pour reperer les reboots */
 static int   ui_face = 0;
 static int   current_emotion = 8;   /* famille "calme" */
 static bool  sd_ok = false;
@@ -1486,6 +1525,80 @@ static void draw_app_maitre(void)
 }
 
 /* ---------- 3. METEO : le ciel, et rien d'autre ---------- */
+/* ------------------------------------------------------------------ */
+/* Gestionnaire d'applis : une appli par page, tuee quand on la quitte.
+   Chaque appli a son allocation et sa liberation ici ; le reste du firmware
+   (wifi, heure, boutons, ecran, rappels, assistant) est un service vital. */
+static void appli_sys_entre(void);
+static void appli_sys_sort(void);
+
+static void appli_entre(int p)
+{
+    app_mem_octets = 0;
+    switch (p) {
+    case PAGE_METEO:
+        /* le tampon de la meteo appartient au service reseau : 2 Ko alloues une
+           fois au demarrage. Le liberer ici pendant qu'une lecture TLS ecrit
+           dedans plantait l'allocateur (use-after-free) -> reboot. */
+        meteo_force = true;              /* lecture fraiche a l'ouverture */
+        break;
+    case PAGE_SYS:
+        appli_sys_entre();
+        app_mem_octets = 48 * sizeof(TaskStatus_t);
+        break;
+    case PAGE_HIST:
+        hist_vue = 0;
+        break;
+    case PAGE_YT:
+        if (!yt_buf) {
+            yt_buf = (char *)heap_caps_malloc(YT_TAILLE, MALLOC_CAP_SPIRAM);
+            yt_buf_taille = yt_buf ? YT_TAILLE : 0;
+        }
+        app_mem_octets = (int)yt_buf_taille;
+        yt_force = true;                 /* lecture fraiche a l'ouverture */
+        break;
+    default:
+        break;
+    }
+    ESP_LOGI(TAG, "appli %s : demarree (%d o prives, interne %u o libres)",
+             PAGE_NOM[p], app_mem_octets,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+static void appli_sort(int p)
+{
+    if (p < 0) return;
+    switch (p) {
+    case PAGE_METEO:
+        break;                       /* tampon du service reseau : on n'y touche pas */
+    case PAGE_SYS:
+        appli_sys_sort();
+        break;
+    case PAGE_YT:
+        /* ne JAMAIS liberer pendant que la tache reseau ecrit dedans : c'etait
+           un use-after-free qui plantait l'allocateur. On libere a la fin de la
+           lecture si la page a ete quittee entre-temps. */
+        if (yt_en_cours) yt_a_liberer = true;
+        else if (yt_buf) { free(yt_buf); yt_buf = NULL; yt_buf_taille = 0; }
+        break;
+    default:
+        break;
+    }
+    ESP_LOGI(TAG, "appli %s : arretee, %d o rendus (interne %u o libres)",
+             PAGE_NOM[p], app_mem_octets,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    app_mem_octets = 0;
+}
+
+/* suit la page courante : c'est le seul endroit qui tue et lance les applis */
+static void appli_suivre_page(void)
+{
+    if (ui_page == page_app) return;
+    appli_sort(page_app);
+    page_app = ui_page;
+    appli_entre(page_app);
+}
+
 static void draw_app_meteo(void)
 {
     char b[48], t[16];
@@ -1528,6 +1641,66 @@ static void draw_app_meteo(void)
     } else {
         a_text(192 - a_text_w(2, "--"), 126, 2, "--");
     }
+}
+
+/* ---------- 6. YOUTUBE : la chaine et sa derniere video ---------- */
+static void draw_app_youtube(void)
+{
+    char b[64];
+    app_titre("YOUTUBE");
+
+    if (!yt_id[0] && !yt_handle[0]) {
+        /* pas encore de chaine : on dit comment la regler, sobrement */
+        a_text_c(100, 54, 3, "CHAINE ?");
+        a_text(8, 92, 2, "console :");
+        a_text(8, 108, 2, "yt @moncompte");
+        a_text(8, 136, 2, "ou /yt?c=@moncompte");
+        return;
+    }
+
+    a_text_gras(8, 30, 3, yt_nom[0] ? yt_nom : (yt_handle[0] ? yt_handle : yt_id));
+
+    if (!yt_ok) {
+        a_text_c(100, 66, 6, "--");
+        if (yt_handle[0] || yt_id[0]) {
+            a_text(8, 104, 2, "LECTURE EN COURS");
+            a_text(8, 124, 2, "REVIENS DANS 10 S");
+        } else {
+            a_text(8, 104, 2, "PAS DE DONNEES");
+            a_text(8, 124, 2, "WIFI NECESSAIRE");
+        }
+        return;
+    }
+
+    a_text(8, 60, 2, "DERNIERE VIDEO");
+    a_hline(6, 193, 72, 1);
+    /* titre sur trois lignes maximum, coupe proprement */
+    {
+        char titre[96];
+        snprintf(titre, sizeof(titre), "%s", yt_titre);
+        int l = 0;
+        char *p = titre;
+        while (*p && l < 3) {
+            char ligne[26];
+            int n = (int)strlen(p);
+            if (n > 24) {
+                n = 24;
+                while (n > 8 && p[n] != ' ') n--;
+            }
+            memcpy(ligne, p, n); ligne[n] = 0;
+            a_text(8, 78 + l * 16, 2, ligne);
+            p += n;
+            while (*p == ' ') p++;
+            l++;
+        }
+    }
+    /* les vues a gauche, l'age en dessous a droite (sinon les deux se collent) */
+    if (yt_vues >= 0) {
+        if (yt_vues >= 1000) snprintf(b, sizeof(b), "%d,%d K VUES", yt_vues / 1000, (yt_vues % 1000) / 100);
+        else                 snprintf(b, sizeof(b), "%d VUES", yt_vues);
+        a_text(8, 150, 2, b);
+    }
+    if (yt_age[0]) a_text(192 - a_text_w(2, yt_age), 168, 2, yt_age);
 }
 
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */
@@ -2469,6 +2642,10 @@ static void sys_page_sort(void)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
+/* les deux crochets SYSTEM pour le gestionnaire d'applis */
+static void appli_sys_entre(void) { sys_page_entre(); }
+static void appli_sys_sort(void)  { sys_page_sort(); }
+
 /* --- petits utilitaires de dessin --- */
 static void sys_barre(int x, int y, int w, int h, int pct)
 {
@@ -2823,8 +3000,9 @@ static void show_ui(void)
 {
     bool plein;
     bool pris = false;
+    appli_suivre_page();      /* entre/sortie d'appli : tue l'appli quittee */
     if (ui_mux) pris = (xSemaphoreTake(ui_mux, pdMS_TO_TICKS(3000)) == pdTRUE);
-    if (!pris && ui_mux) return;      /* un autre dessin est en cours : on saute ce tour */
+    if (!pris && ui_mux) { redraw_demande = true; return; }   /* un autre dessin est en cours : on reessaie */
     fb_clear();
     art_begin(fb, 0);                 /* les dessins BATMino partagent ce framebuffer */
     if (rep_ouvert && !act_on) {  /* la reponse occupe tout l'ecran tant qu'on ne la ferme pas */
@@ -2846,6 +3024,7 @@ static void show_ui(void)
         case PAGE_TIMER:   draw_app_timer();  break;
         case PAGE_SYS:     draw_app_sys();    break;
         case PAGE_HIST:    draw_app_hist();   break;
+        case PAGE_YT:      draw_app_youtube(); break;
         case PAGE_REG:     draw_app_reglages(); break;
         default:           draw_app_sys();     break;
         }
@@ -2871,6 +3050,7 @@ static void show_ui(void)
     }
     if (xSemaphoreTake(epd_mux, pdMS_TO_TICKS(8000)) != pdTRUE) {
         ESP_LOGW(TAG, "ecran : mutex occupe, image sautee");
+        redraw_demande = true;
         if (pris) xSemaphoreGive(ui_mux);
         return;
     }
@@ -3246,12 +3426,10 @@ static void reg_bouton_long(int n);
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
     if (rep_bouton_court(n)) return;     /* la reponse en pages plein ecran */
-    if (ui_page == PAGE_HIST && n == 0) { /* 1 : remonter dans l'historique (appui long = plus recent) */
-        hist_vue += 3;
-        if (!hist_p || hist_vue > hist.n - 1) hist_vue = (hist_p && hist.n > 0) ? hist.n - 1 : 0;
-        show_ui();
-        return;
-    }
+    /* (l'historique ne prend plus le bouton 1 : sinon, arrive sur la derniere
+       page, l'appui simple ne faisait que remonter le journal et le cycle
+       restait bloque la — « impossible de changer d'app ». Le defilement se
+       fait par la console (`hist`) et par le web.) */
     /* la sonnerie passe avant tout : le bouton 1 la fait taire */
     if (alarme_on && n == 0) {
         alarme_on = false;
@@ -3268,7 +3446,19 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         show_ui();
         return;
     }
-    /* navigation : 1 = page suivante, 2 = page precedente */
+    /* navigation : 1 = page suivante, 2 = page precedente.
+       Une dalle e-paper met ~1 s a se rafraichir : enchainer les appuis plus
+       vite que ca laisse la dalle en BUSY, elle se met en panne et l'ecran
+       s'eteint. On ignore donc les appuis trop rapproches. */
+    {
+        static int64_t dernier_changement = 0;
+        int64_t t = esp_timer_get_time() / 1000;
+        if (dernier_changement && t - dernier_changement < 1200) {
+            ESP_LOGW(TAG, "page : appui trop rapide, ignore (dalle occupee)");
+            return;
+        }
+        dernier_changement = t;
+    }
     ui_page = (n == 0) ? (ui_page + 1) % PAGE_COUNT
                        : (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;
     ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-suite" : "2-avant", PAGE_NOM[ui_page]);
@@ -3660,17 +3850,56 @@ static void pet_task(void *arg)
 
 /* rafraichit l'horloge de la barre toutes les minutes */
 static volatile int ui_ticks = 0;      /* tours de la tache ui : 0 = tache morte */
+/* ---- lectures reseau hors de la tache ecran ----
+   Un TLS prend 3 a 20 s : fait ici, dans sa propre tache, l'ecran et les
+   boutons ne se figent plus pendant un telechargement. */
+enum { NET_METEO = 1, NET_INFOS = 2, NET_YT = 3 };
+static QueueHandle_t net_q = NULL;
+static volatile int net_meteo_ok = -1;   /* -1 = rien a dire, 0 = echec, 1 = reussi */
+
+static void net_demande(int quoi)
+{
+    if (!net_q) return;
+    if (xQueueSend(net_q, &quoi, 0) != pdTRUE) {
+        xQueueReset(net_q);              /* file pleine : on garde la recente */
+        xQueueSend(net_q, &quoi, 0);
+    }
+}
+
+static void net_task(void *arg)
+{
+    int quoi;
+    for (;;) {
+        if (xQueueReceive(net_q, &quoi, portMAX_DELAY) != pdTRUE) continue;
+        switch (quoi) {
+        case NET_METEO: net_meteo_ok = meteo_lire() ? 1 : 0; break;
+        case NET_INFOS: infos_lire(); break;
+        case NET_YT:    yt_lire(); break;
+        default: break;
+        }
+        redraw_demande = true;           /* la donnee est arrivee : on redessine */
+    }
+}
+
 static void ui_task(void *arg)
 {
     int last_min = -1;
     int last_secu = -999;
     int derniere_meteo = -100000;      /* -> premiere mesure tout de suite */
     int dernieres_infos = -100000;
+    int derniere_yt = -100000;
     for (;;) {
         ui_ticks++;
+        if (redraw_demande) { redraw_demande = false; show_ui(); }
         time_t now = time(NULL);
         struct tm ti;
         localtime_r(&now, &ti);
+        /* resultat de la derniere lecture meteo faite par la tache reseau */
+        if (net_meteo_ok >= 0) {
+            if (net_meteo_ok == 0)
+                derniere_meteo = (int)now - (METEO_PERIODE_S - 60);   /* reessai dans 1 min */
+            net_meteo_ok = -1;
+        }
         wifi_ap_record_t ap = {};
         ui_wifi_ok = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
         if (ti.tm_min != last_min) {
@@ -3685,19 +3914,31 @@ static void ui_task(void *arg)
            Le test du wifi est ici et pas dans meteo_lire() : sinon la premiere
            tentative (au demarrage, avant l'IP) consommait le creneau et la page
            restait vide un quart d'heure. */
+        /* la meteo n'est lue que si l'appli METEO est au premier plan (sinon on
+           ne paie pas un TLS toutes les 15 min pour une page qu'on ne regarde
+           pas) — sauf la premiere lecture, qui sert aussi a l'assistant */
         if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
-            (int)now - derniere_meteo >= METEO_PERIODE_S) {
+            (ui_page == PAGE_METEO || derniere_meteo == -100000) &&
+            ((int)now - derniere_meteo >= METEO_PERIODE_S || meteo_force)) {
+            meteo_force = false;
             derniere_meteo = (int)now;
-            bool meteo_ok_lu = meteo_lire();
-            if (!meteo_ok_lu) derniere_meteo = (int)now - (METEO_PERIODE_S - 60);  /* reessai dans 1 min */
-            if (ui_page == PAGE_MAITRE || ui_page == PAGE_METEO) show_ui();
+            net_demande(NET_METEO);      /* la lecture TLS se fait ailleurs :
+                                            l'ecran ne doit jamais l'attendre */
+        }
+        /* la chaine YouTube : a l'ouverture de sa page, puis toutes les 30 min */
+        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) && ui_page == PAGE_YT &&
+            ((int)now - derniere_yt >= 1800 || yt_force)) {
+            yt_force = false;
+            derniere_yt = (int)now;
+            net_demande(NET_YT);
+            show_ui();
         }
         /* les titres du moment : au demarrage puis toutes les 30 min, pour que
            le cerveau ait l'actualite du jour dans son contexte. */
         if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
             (int)now - dernieres_infos >= 1800) {
             dernieres_infos = (int)now;
-            infos_lire();
+            net_demande(NET_INFOS);
         }
         /* sur la page securite, on remesure toutes les 30 s */
         if (ui_page == 99 && (int)now - last_secu >= 30) {
@@ -6289,7 +6530,8 @@ static bool groq_pret(void)
     return (strncmp(k, "gsk_", 4) == 0);
 }
 
-static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
+static int http_get_ex(const char *url, const char *ua, const char *cookie,
+                       uint8_t *buf, int cap)
 {
     esp_http_client_config_t cfg = {};
         cfg.max_redirection_count = 4;   /* FG Radio et autres : suivre les 302 */
@@ -6300,6 +6542,8 @@ static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
     if (!c) return -1;
     if (ua) esp_http_client_set_header(c, "User-Agent", ua);
+    /* YouTube renvoie un 302 vers consent.youtube.com sans ce cookie (UE) */
+    if (cookie) esp_http_client_set_header(c, "Cookie", cookie);
     int res = -1;
     if (esp_http_client_open(c, 0) == ESP_OK) {
         int64_t annonce = esp_http_client_fetch_headers(c);
@@ -6339,6 +6583,12 @@ static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
     esp_http_client_close(c);
     esp_http_client_cleanup(c);
     return res;
+}
+
+/* la version simple, sans cookie : tout le reste du firmware passe par la */
+static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
+{
+    return http_get_ex(url, ua, NULL, buf, cap);
 }
 
 /* va chercher les titres du moment et les met en forme pour l'ecran */
@@ -6859,11 +7109,19 @@ static bool meteo_lire(void)
     /* pas de reseau : on ne tente pas un TLS de 20 s, la tache ui resterait
        bloquee et l'ecran (et les boutons) avec elle */
     if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) return false;
-    static uint8_t buf[2048];
-    int r = http_get(METEO_URL, NULL, buf, sizeof(buf) - 1);
+    /* le tampon de l'appli METEO n'existe qu'avec la page METEO ; la meteo est
+       aussi lue au demarrage (sans page) : on l'alloue alors a la demande */
+    if (!meteo_buf) {
+        meteo_buf = (char *)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
+        if (!meteo_buf) meteo_buf = (char *)malloc(2048);
+        meteo_buf_taille = meteo_buf ? 2048 : 0;
+        if (!meteo_buf) { ESP_LOGW(TAG, "meteo : pas de tampon"); return false; }
+    }
+    char *buf = meteo_buf;
+    int r = http_get(METEO_URL, NULL, (uint8_t *)buf, (int)meteo_buf_taille - 1);
     if (r <= 0) { ESP_LOGW(TAG, "meteo injoignable (%d)", r); return false; }
     buf[r] = 0;
-    cJSON *j = cJSON_Parse((char *)buf);
+    cJSON *j = cJSON_Parse(buf);
     cJSON *cur = j ? cJSON_GetObjectItem(j, "current") : NULL;
     cJSON *t = cur ? cJSON_GetObjectItem(cur, "temperature_2m") : NULL;
     cJSON *w = cur ? cJSON_GetObjectItem(cur, "weather_code") : NULL;
@@ -6901,9 +7159,191 @@ static bool meteo_lire(void)
     return ok;
 }
 
-static const char *meteo_texte(int code)
+/* ---- appli YOUTUBE : resolution de la chaine, puis lecture du flux RSS ----
+   Aucune cle d'API : on resout @pseudo -> UC... en lisant la page de la chaine,
+   puis on lit le flux RSS public (titre de la derniere video, vues, date). */
+static void yt_sauve(void)
 {
-    if (code < 0)               return "meteo en attente";
+    nvs_handle_t h;
+    if (nvs_open("mino", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, "yt_h", yt_handle);
+    nvs_set_str(h, "yt_id", yt_id);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void yt_charge(void)
+{
+    nvs_handle_t h;
+    size_t n;
+    if (nvs_open("mino", NVS_READONLY, &h) != ESP_OK) return;
+    n = sizeof(yt_handle);
+    if (nvs_get_str(h, "yt_h", yt_handle, &n) != ESP_OK) yt_handle[0] = 0;
+    n = sizeof(yt_id);
+    if (nvs_get_str(h, "yt_id", yt_id, &n) != ESP_OK) yt_id[0] = 0;
+    nvs_close(h);
+    ESP_LOGI(TAG, "youtube : chaine enregistree '%s' (%s)", yt_handle, yt_id);
+}
+
+
+/* le flux videos.xml de YouTube est mort (404) : on lit la page de la chaine,
+   avec le cookie qui evite le renvoi vers consent.youtube.com. */
+
+/* valeur d'une chaine JSON placee juste apres `marque` */
+static bool yt_valeur(const char *src, const char *marque, char *out, size_t sz)
+{
+    const char *p = strstr(src, marque);
+    if (!p) return false;
+    p += strlen(marque);
+    size_t n = 0;
+    while (*p && *p != '"' && n + 1 < sz) {
+        if (*p == '\\') {                 /* \" \\ \u00a0 : on saute l'echappement */
+            p++;
+            if (*p == 'u') { p += 4; out[n++] = ' '; continue; }
+            if (*p == 'n') { out[n++] = ' '; p++; continue; }
+            if (!*p) break;
+        }
+        /* espace insecable UTF-8 (0xC2 0xA0) des nombres de vues */
+        if ((unsigned char)*p == 0xC2 && (unsigned char)p[1] == 0xA0) {
+            p += 2; out[n++] = ' '; continue;
+        }
+        out[n++] = *p++;
+    }
+    out[n] = 0;
+    /* les espaces insecables des nombres de vues */
+    for (size_t i = 0; i < n; i++) if ((unsigned char)out[i] == 0xC2) out[i] = ' ';
+    return n > 0;
+}
+
+/* le dessin est en majuscules sans accents : on met le titre a plat avant de
+   le garder (sinon les octets UTF-8 des accents sortent en symboles bizarres et
+   la coupe des lignes se fait au milieu d'un mot) */
+static void yt_nettoie(char *s)
+{
+    static const struct { const char *de; char vers; } TAB[] = {
+        { "\xC3\xA9", 'E' }, { "\xC3\xA8", 'E' }, { "\xC3\xAA", 'E' }, { "\xC3\xAB", 'E' },
+        { "\xC3\xA0", 'A' }, { "\xC3\xA2", 'A' }, { "\xC3\xA4", 'A' },
+        { "\xC3\xA7", 'C' }, { "\xC3\xB4", 'O' }, { "\xC3\xB6", 'O' },
+        { "\xC3\xB9", 'U' }, { "\xC3\xBB", 'U' }, { "\xC3\xAE", 'I' }, { "\xC3\xAF", 'I' },
+        { "\xC3\xB1", 'N' }, { "\xE2\x80\x99", '\'' }, { "\xE2\x80\xA6", '.' },
+        { "\xC2\xA0", ' ' }, { "\xC2\xAB", '"' }, { "\xC2\xBB", '"' },
+    };
+    char out[128]; size_t n = 0;
+    for (const char *p = s; *p && n + 1 < sizeof(out); ) {
+        bool fait = false;
+        if ((unsigned char)*p >= 0x80) {
+            for (size_t i = 0; i < sizeof(TAB) / sizeof(TAB[0]); i++) {
+                size_t l = strlen(TAB[i].de);
+                if (strncmp(p, TAB[i].de, l) == 0) { out[n++] = TAB[i].vers; p += l; fait = true; break; }
+            }
+            if (!fait) {                 /* accent inconnu : on saute la sequence */
+                p++;
+                while (((unsigned char)*p & 0xC0) == 0x80) p++;
+            }
+            continue;
+        }
+        char c = *p++;
+        if (c == '@' || c == '#' || c == '|') continue;   /* pas de glyphe */
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        out[n++] = c;
+    }
+    out[n] = 0;
+    char *d = out, *q = out;
+    int esp = 0;
+    while (*d == ' ') d++;
+    for (; *d; d++) {
+        if (*d == ' ') { if (esp) continue; esp = 1; }
+        else esp = 0;
+        *q++ = *d;
+    }
+    while (q > out && q[-1] == ' ') q--;
+    *q = 0;
+    size_t lon = strlen(out);
+    if (lon > 95) lon = 95;
+    memcpy(s, out, lon);
+    s[lon] = 0;
+}
+
+static void yt_lire_corps(void)
+{
+    if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) return;
+    if (!yt_buf) {
+        yt_buf = (char *)heap_caps_malloc(YT_TAILLE, MALLOC_CAP_SPIRAM);
+        yt_buf_taille = yt_buf ? YT_TAILLE : 0;
+        if (!yt_buf) { ESP_LOGW(TAG, "youtube : pas de PSRAM"); return; }
+    }
+    if (!yt_handle[0] && !yt_id[0]) return;
+    char url[180];
+    if (yt_handle[0])
+        snprintf(url, sizeof(url), "https://www.youtube.com/%s", yt_handle);
+    else
+        snprintf(url, sizeof(url), "https://www.youtube.com/channel/%s", yt_id);
+
+    int r = http_get_ex(url, YT_UA, YT_COOKIE, (uint8_t *)yt_buf, (int)yt_buf_taille - 1);
+    if (r <= 0) { ESP_LOGW(TAG, "youtube : page injoignable (%d)", r); return; }
+    yt_buf[r] = 0;
+    ESP_LOGI(TAG, "youtube : page lue (%d o)", r);
+
+    /* 1. l'identifiant de la chaine (garde en NVS pour les fois suivantes) */
+    if (!yt_id[0]) {
+        const char *p = strstr(yt_buf, "youtube.com/channel/UC");
+        if (p) p += strlen("youtube.com/channel/");
+        if (p) {
+            int i = 0;
+            while (i < 24 && p[i] && p[i] != '"' && p[i] != '&') { yt_id[i] = p[i]; i++; }
+            yt_id[i] = 0;
+            ESP_LOGI(TAG, "youtube : %s -> %s", yt_handle, yt_id);
+            yt_sauve();
+        }
+    }
+    /* 2. le nom de la chaine */
+    yt_valeur(yt_buf, "property=\"og:title\" content=\"", yt_nom, sizeof(yt_nom));
+    if (!yt_nom[0]) snprintf(yt_nom, sizeof(yt_nom), "%s", yt_handle);
+
+    /* 3. la video mise en avant (la plus recente sur la page de la chaine) */
+    const char *bloc = strstr(yt_buf, "channelVideoPlayerRenderer");
+    if (!bloc) bloc = yt_buf;
+    yt_titre[0] = 0;
+    yt_valeur(bloc, "\"title\":{\"runs\":[{\"text\":\"", yt_titre, sizeof(yt_titre));
+    if (!yt_titre[0])
+        yt_valeur(bloc, "\"title\":{\"simpleText\":\"", yt_titre, sizeof(yt_titre));
+    if (!yt_titre[0]) { ESP_LOGW(TAG, "youtube : titre de video introuvable"); return; }
+
+    /* 4. les vues et l'age, tels que YouTube les ecrit */
+    char vu[48] = "";
+    yt_vues = -1;
+    if (yt_valeur(bloc, "\"viewCountText\":{\"simpleText\":\"", vu, sizeof(vu))) {
+        char chiffres[16]; int k = 0;
+        for (int i = 0; vu[i] && k < 15; i++) if (vu[i] >= '0' && vu[i] <= '9') chiffres[k++] = vu[i];
+        chiffres[k] = 0;
+        if (k) yt_vues = atoi(chiffres);
+    }
+    yt_age[0] = 0;
+    yt_valeur(bloc, "\"publishedTimeText\":{\"runs\":[{\"text\":\"", yt_age, sizeof(yt_age));
+
+    yt_ok = true;
+    yt_nettoie(yt_titre);
+    yt_nettoie(yt_nom);
+    yt_nettoie(yt_age);
+    ESP_LOGI(TAG, "youtube %s : '%s' (%d vues, %s)", yt_nom, yt_titre, yt_vues, yt_age);
+}
+
+/* l'enveloppe : une seule lecture a la fois, et le tampon n'est libere qu'une
+   fois la lecture finie (sinon use-after-free dans l'allocateur -> reboot) */
+static void yt_lire(void)
+{
+    if (yt_en_cours) return;
+    yt_en_cours = true;
+    yt_lire_corps();
+    yt_en_cours = false;
+    if (yt_a_liberer) {
+        yt_a_liberer = false;
+        if (yt_buf) { free(yt_buf); yt_buf = NULL; yt_buf_taille = 0; }
+    }
+}
+
+static const char *meteo_texte(int code)
+{    if (code < 0)               return "meteo en attente";
     if (code == 0)              return "grand soleil";
     if (code <= 2)              return "peu nuageux";
     if (code == 3)              return "nuageux";
@@ -8274,9 +8714,13 @@ static void mino_handle_line(const char *line)
         for (int i = 0; i < TIMER_MAX; i++) if (timers[i].fin_s) nt++;
         ESP_LOGI(TAG, "diag : rappel_nb=%d dernier='%s' alarme=%d jouee=%d timers_actifs=%d",
                  rappel_nb, rappel_dernier, alarme_on ? 1 : 0, alarme_jouee, nt);
-        ESP_LOGI(TAG, "diag : heap_int_max=%u psram=%u",
+        ESP_LOGI(TAG, "diag : page=%s app=%s app_mem=%d boot_nb=%d heap_int_max=%u psram=%u",
+                 PAGE_NOM[ui_page], app_mem_octets ? PAGE_NOM[page_app >= 0 ? page_app : 0] : "aucune",
+                 app_mem_octets, (int)boot_nb,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        ESP_LOGI(TAG, "diag : yt_chaine='%s' yt_video='%s' yt_vues=%d yt_ok=%d",
+                 yt_handle, yt_titre, yt_vues, yt_ok ? 1 : 0);
         return;
     }
     if (!strcmp(line, "memo")) {
@@ -8600,10 +9044,74 @@ static void mino_handle_line(const char *line)
                      journal_lignes[(journal_tete + 12 - journal_n + i) % 12]);
         return;
     }
+    if (!strncmp(line, "btn", 3)) {          /* btn 1 | btn 2 | btn 1 long | btn 1 dbl */
+        int n = (line[4] == '2') ? 1 : 0;
+        int avant = ui_page;
+        if (strstr(line, "long"))      bouton_long(n, 0);
+        else if (strstr(line, "dbl"))  bouton_double(n);
+        else                            bouton_court(n);
+        ESP_LOGI(TAG, "essai bouton %d -> page %s%s", n + 1, PAGE_NOM[ui_page],
+                 avant != ui_page || strstr(line, "dbl") ? "" : " (ignore)");
+        return;
+    }
+    if (!strncmp(line, "keys", 4)) {
+        /* balayage des GPIO libres : sert a retrouver les boutons d'une
+           variante de carte (une carte n'a que BOOT+PWR, une autre a un
+           pavé directionnel — on ecoute et on regarde qui bouge) */
+        static const int pins[] = { 1, 2, 3, 4, 5, 14, 15, 16, 21, 38, 45, 46 };
+        const int n = (int)(sizeof(pins) / sizeof(pins[0]));
+        int duree = (line[4] == ' ') ? atoi(line + 5) : 60;
+        if (duree <= 0 || duree > 600) duree = 60;
+        for (int i = 0; i < n; i++) {
+            gpio_reset_pin((gpio_num_t)pins[i]);
+            gpio_set_direction((gpio_num_t)pins[i], GPIO_MODE_INPUT);
+            gpio_set_pull_mode((gpio_num_t)pins[i], GPIO_PULLUP_ONLY);
+        }
+        ESP_LOGI(TAG, "keys : %d s d'ecoute sur 12 GPIO — appuie sur les fleches une par une", duree);
+        uint32_t avant = 0;
+        for (int t = 0; t < duree * 5; t++) {
+            uint32_t etat = 0;
+            for (int i = 0; i < n; i++)
+                if (gpio_get_level((gpio_num_t)pins[i]) == 0) etat |= (1u << i);
+            if (etat != avant) {
+                for (int i = 0; i < n; i++) {
+                    int a = (avant >> i) & 1, b = (etat >> i) & 1;
+                    if (a != b) ESP_LOGI(TAG, "keys : GPIO %d -> %s", pins[i], b ? "APPUYE" : "relache");
+                }
+                avant = etat;
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        ESP_LOGI(TAG, "keys : fin — etat final %08x", (unsigned)avant);
+        return;
+    }
+    if (!strncmp(line, "yt", 2) && (line[2] == 0 || line[2] == ' ')) {
+        /* yt @moncompte  /  yt UCxxxxxxxxxxxxxxxxxxxxxx  : regle la chaine
+           yt             : affiche ce qui est connu */
+        if (line[2] == ' ') {
+            const char *c = line + 3;
+            while (*c == ' ') c++;
+            if (!strncmp(c, "UC", 2) && strlen(c) >= 24) {
+                snprintf(yt_id, sizeof(yt_id), "%.24s", c);
+                yt_handle[0] = 0;
+            } else if (*c) {
+                if (*c == '@') snprintf(yt_handle, sizeof(yt_handle), "%s", c);
+                else           snprintf(yt_handle, sizeof(yt_handle), "@%s", c);
+                yt_id[0] = 0;
+            }
+            yt_sauve();
+            yt_ok = false;
+            yt_lire();                 /* tout de suite, on verra si ca marche */
+        }
+        ESP_LOGI(TAG, "youtube : chaine='%s' id='%s' nom='%s' video='%s' (%d vues, %s)",
+                 yt_handle, yt_id, yt_nom, yt_titre, yt_vues, yt_age);
+        show_ui();
+        return;
+    }
     if (!strcmp(line, "ui") || !strncmp(line, "ui ", 3)) {
         if (line[2] == ' ') {
             int p = atoi(line + 3);
-            if (p >= 0 && p < PAGE_COUNT) ui_page = p;
+            if (p >= 0 && p < PAGE_COUNT) { ui_page = p; rep_ouvert = false; }
             else if (line[3] == 'f') ui_face = (ui_face + 1) % EXPR_N;
         }
         ui_read_sensors();
@@ -9209,6 +9717,9 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(r, "heap_libre", (double)esp_get_free_heap_size());
     cJSON_AddNumberToObject(r, "historique_tours", hist_p ? (double)hist.n : 0);
+    cJSON_AddStringToObject(r, "yt_chaine", yt_handle);
+    cJSON_AddStringToObject(r, "yt_video", yt_titre);
+    cJSON_AddNumberToObject(r, "yt_vues", (double)yt_vues);
     cJSON_AddBoolToObject(r, "hist_sd", hist_sd_pret);
     cJSON_AddNumberToObject(r, "hist_sd_n", (double)hist_sd_n);
     cJSON_AddNumberToObject(r, "hist_sd_tours", (double)hist_sd_tours);
@@ -9553,11 +10064,34 @@ extern "C" void app_main(void)
         nvs_flash_erase();
         nvs_flash_init();
     }
+    /* pourquoi la carte a redemarre : panic (bug), brownout (alim), wdt (blocage) */
+    {
+        static const char *RR[] = { "inconnu", "poweron", "reset_ext", "software",
+                                    "panic", "int_wdt", "task_wdt", "wdt_autre",
+                                    "deepsleep", "brownout", "sdio", "usb", "jtag" };
+        esp_reset_reason_t rr = esp_reset_reason();
+        ESP_LOGW(TAG, "demarrage : raison du reset = %s (%d)  heap_int=%u",
+                 (int)rr >= 0 && (int)rr < 13 ? RR[(int)rr] : "?",
+                 (int)rr, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        /* compteur de demarrages en NVS : s'il monte sans qu'on ait flashe,
+        c'est que la carte redemarre toute seule (le bug qu'on cherche) */
+        nvs_handle_t h;
+        if (nvs_open("mino", NVS_READWRITE, &h) == ESP_OK) {
+            uint32_t n = 0;
+            nvs_get_u32(h, "boot_nb", &n);
+            boot_nb = n + 1;
+            nvs_set_u32(h, "boot_nb", boot_nb);
+            nvs_commit(h);
+            nvs_close(h);
+            ESP_LOGW(TAG, "demarrage n%d", (int)boot_nb);
+        }
+    }
 
     mem_mux = xSemaphoreCreateMutex();
     epd_mux = xSemaphoreCreateMutex();
     i2c_mux = xSemaphoreCreateMutex();
     ping_mux = xSemaphoreCreateMutex();
+    yt_charge();                       /* la chaine YouTube reglee une fois pour toutes */
 
     heure_charge();     /* l'heure d'avant tout de suite : plus de date fausse au demarrage */
     timers_charge();    /* restaure les timers/alarmes */
@@ -9700,9 +10234,15 @@ extern "C" void app_main(void)
     api_start();
     xTaskCreate(serial_task, "console", 6144, NULL, 4, NULL);
     xTaskCreate(touch_task, "tactile", 4096, NULL, 4, NULL);
-    xTaskCreate(button_task, "boutons", 3072, NULL, 3, NULL);
+    xTaskCreate(button_task, "boutons", 5120, NULL, 3, NULL);   /* dessine aussi les pages */
     xTaskCreate(alarme_task, "alarme", 4096, NULL, 3, NULL);
-    xTaskCreate(ui_task, "ui", 8192, NULL, 3, NULL);   /* TLS pour la meteo */
+    xTaskCreate(ui_task, "ui", 4096, NULL, 3, NULL);   /* plus de TLS ici : il est dans net_task */
+    net_q = xQueueCreate(4, sizeof(int));
+    xTaskCreate(net_task, "reseau", 8192, NULL, 2, NULL);   /* meteo, infos, youtube : les TLS */
+    /* tampon de la meteo : 2 Ko pour toute la vie de la carte (service reseau) */
+    meteo_buf = (char *)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
+    if (!meteo_buf) meteo_buf = (char *)malloc(2048);
+    meteo_buf_taille = meteo_buf ? 2048 : 0;
     xTaskCreate(pet_task, "tamagotchi", 4096, NULL, 3, NULL);
     /* plus de tache "promenade" : elle redessinait la page toutes les 2 s, or
        chaque image fait clignoter la dalle. Le compagnon bouge maintenant une

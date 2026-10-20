@@ -1,9 +1,19 @@
-# BATMino — le robot e-paper (Waveshare ESP32-S3-ePaper-1.54)
+# ADV card computer — le robot e-paper (Waveshare ESP32-S3-ePaper-1.54)
 
 Carte : ESP32-S3, 8 Mo PSRAM, écran e-paper 200x200 monochrome, micro + ES8311,
 carte micro SD 128 Go. MAC `70:04:1d:d7:aa:28`, port série `/dev/ttyACM0`
 (USB-Serial/JTAG). Ce dossier est la copie de travail : la copie d'origine
 `/home/taz/robot-ia` appartient à root.
+
+## Le projet
+
+**ADV card computer** (le robot s'appelle BATMino). Une appli par page, chaque
+appli tuée en mémoire quand on la quitte, et seulement le Wi-Fi, l'heure, les
+boutons, l'écran, les rappels et l'assistant qui tournent en permanence.
+
+- Une fiche par fonctionnalité, avec ses tests : `docs/features/`
+- Test global sur la carte, par l'USB : `tools/test_global.py`
+- Lancer les tests : `source tools/env.sh && $IDF_PYTHON_ENV_PATH/bin/python tools/test_global.py /dev/ttyACM1`
 
 ## Ce qu'il est devenu
 
@@ -57,6 +67,8 @@ Pages du cycle, une appli par page (comme les premières versions) :
     SYSTEM     cpu, ram, psram, watts, réseau (nom de la borne en haut à
                droite), carte SD et flash
     HISTORIQUE les derniers échanges lus sur la carte
+    YOUTUBE    la chaîne et sa dernière vidéo (vues, âge). Se règle une fois :
+               `yt @monpseudo` dans la console, ou `yt UCxxxx...`
 
 La page RÉGLAGES existe encore dans le code mais n'est plus dans le cycle
 (jugée mal faite) : elle reste joignable par `/reglages` et `/wifi` (et garde
