@@ -1143,9 +1143,9 @@ void ui_ecran_timer(const char *titre, const char *haut_d,
         a_ring(100, 74, 30, 2, 1);
         a_hline(84, 116, 74, 4);                     /* le + */
         a_vline(100, 58, 90, 4);
-        a_text_c(100, 118, 1, "NOUVEAU TIMER");
-        if (bas1) a_text_c(100, 136, 1, bas1);
-        if (bas2) a_text_c(100, 148, 1, bas2);
+        a_text_c(100, 112, 2, "NOUVEAU TIMER");
+        if (bas1) a_text_c(100, 136, 2, bas1);
+        if (bas2) a_text_c(100, 152, 2, bas2);
         return;
     }
 
@@ -1177,8 +1177,8 @@ void ui_ecran_timer(const char *titre, const char *haut_d,
         }
     }
 
-    /* --- bas : le preset et les boutons --- */
-    a_hline(0, 199, 186, 1);
-    if (bas1) a_text_c(100, 190, 1, bas1);
-    if (bas2) a_text_c(100, 172, 1, bas2);
+    /* --- bas : le preset et les boutons, en corps 2 (lisible a bout de bras) --- */
+    a_hline(0, 199, 166, 1);
+    if (bas1) a_text_c(100, 172, 2, bas1);
+    if (bas2) a_text_c(100, 186, 2, bas2);
 }

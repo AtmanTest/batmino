@@ -255,7 +255,7 @@ static int   meteo_code;
 /* demain : pour repondre a "quel temps demain" sans passer par le web */
 static float meteo_dem_min = 0, meteo_dem_max = 0;
 static int   meteo_dem_code = -1, meteo_dem_pluie = -1;
-static void meteo_lire(void);
+static bool meteo_lire(void);
 static const char *meteo_texte(int code);
 static const char *ia_key(void);
 static bool groq_pret(void);
@@ -272,14 +272,17 @@ static void draw_status_bar(void);
  *   4 MEMOIRE  ce qu'il sait
  *   5 RADIO     la radio (le PC n'est plus necessaire)
  */
-#define PAGE_MAITRE 0
-/* deux pages seulement : l'accueil (ou vit la conversation) et le systeme */
-#define PAGE_SYS    1
-#define PAGE_HIST   2                     /* l'historique des echanges, sur la carte SD */
-#define PAGE_REG    3                     /* REGLAGES : hors cycle (jugee mal faite),
+#define PAGE_MAITRE 0                     /* ACCUEIL : l'heure, la date, le prochain rdv */
+/* une appli par page, comme les premieres versions : chaque ecran a son sujet
+   et rien d'autre */
+#define PAGE_METEO  1                     /* METEO    : le ciel, aujourd'hui et demain */
+#define PAGE_TIMER  2                     /* RAPPELS  : les minuteurs et rappels en cours */
+#define PAGE_SYS    3                     /* SYSTEM   : cpu, ram, watts, reseau, stockage */
+#define PAGE_HIST   4                     /* HISTORIQUE : les derniers echanges */
+#define PAGE_REG    5                     /* REGLAGES : hors cycle (jugee mal faite),
                                              joignable par /reglages et le web */
-#define PAGE_COUNT  3
-static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "SYSTEM", "HISTORIQUE"};
+#define PAGE_COUNT  5
+static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "RAPPELS", "SYSTEM", "HISTORIQUE"};
 
 /* defilement de la page HISTORIQUE : nombre de messages remontes dans le passe */
 static int hist_vue = 0;
@@ -313,6 +316,10 @@ static void  ui_chime(void);
 /* audio : tampon mono 16 bits en PSRAM et aides, utilisees des le reveil */
 static uint8_t *rec_pcm = NULL;
 static volatile bool alarme_on = false;   /* la sonnerie du rendez-vous tourne */
+static volatile bool heure_syncee = false; /* NTP deja passe (on le refait si le wifi revient) */
+/* phrase a dire apres le carillon quand la sonnerie vient d'un RAPPEL (timer
+   nomme) et non du calendrier ; vide = on annonce le rendez-vous */
+static char    annonce_txt[96] = "";
 static bool veille_nuit = false;          /* mise en veille la nuit (22h-7h) : OFF par defaut */
 static bool voix_sortie = false;          /* HAUT-PARLEUR MUET : le robot ecrit, il ne parle pas */
 static int  voix_dit_nb = 0;              /* phrases produites (muettes ou non) */
@@ -1464,27 +1471,8 @@ static void draw_app_maitre(void)
         return;
     }
 
-    /* la meteo du jour, sur une seule ligne : icone, 8.0C, NUAGEUX */
-    {
-        char t[16], cond[32];
-        if (meteo_ok) snprintf(t, sizeof(t), "%.1fC", (double)meteo_temp);
-        else          snprintf(t, sizeof(t), "--");
-        snprintf(cond, sizeof(cond), "%.20s", meteo_texte(meteo_code));
-        /* la temperature en corps 3, l'etat du ciel en corps 2 : sinon
-           "PEU NUAGEUX" vient manger la place du nom de la borne wifi */
-        int wt = a_text_w(3, t), wc = a_text_w(2, cond);
-        int x = 100 - (18 + wt + 8 + wc) / 2;
-        ic_temp(x + 6, 77);
-        a_text(x + 18, 70, 3, t);
-        a_text(x + 18 + wt + 8, 75, 2, cond);
-    }
-    /* la ville en gras a gauche, la borne wifi en petit a droite : deux
-       reperes utiles (ou je suis, sur quoi je suis connecte) */
-    a_text_gras(8, 87, 2, METEO_VILLE);
     if (alarme_on)
-        a_text_gras(192 - a_text_w(2, "1 = STOP"), 86, 2, "1 = STOP");
-    else if (wifi_actif[0])
-        a_text(192 - a_text_w(2, wifi_actif), 86, 2, wifi_actif);
+        a_text_c_gras(100, 80, 2, "1 = STOP");   /* la sonnerie tourne */
 
     /* ------ prochain rendez-vous, dans un cadre fin ------ */
     a_hline(8, 192, 100, 1);
@@ -1495,6 +1483,51 @@ static void draw_app_maitre(void)
 
     /* le petit compagnon se promene sous le cadre (tache promenade) */
     draw_kirby(kirby_x, kirby_y, 4, anim_ph, kirby_etat());
+}
+
+/* ---------- 3. METEO : le ciel, et rien d'autre ---------- */
+static void draw_app_meteo(void)
+{
+    char b[48], t[16];
+    app_titre("METEO");
+
+    a_text_gras(8, 32, 3, METEO_VILLE);
+
+    if (!meteo_ok) {
+        /* pas de mesure : une seule phrase, pas un ecran de tirets */
+        a_text_c(100, 62, 7, "--");
+        a_text(8, 108, 3, "PAS DE DONNEES");
+        a_text(8, 136, 2, "WIFI NECESSAIRE");
+        return;
+    }
+
+    /* la temperature du moment : tres gros, groupe avec l'icone au centre */
+    snprintf(t, sizeof(t), "%.1fC", (double)meteo_temp);
+    {
+        int wt = a_text_w(6, t);
+        int x0 = 100 - (16 + 12 + wt) / 2;
+        ic_temp(x0 + 8, 70);
+        a_text(x0 + 16 + 12, 56, 6, t);
+    }
+
+    /* l'etat du ciel, en clair */
+    a_text(8, 96, 3, meteo_texte(meteo_code));
+
+    a_hline(6, 193, 118, 1);
+
+    /* demain : la plage de temperatures a droite, le ciel et la pluie en dessous */
+    a_text(8, 126, 2, "DEMAIN");
+    if (meteo_dem_code >= 0) {
+        snprintf(b, sizeof(b), "%d-%dC", (int)meteo_dem_min, (int)meteo_dem_max);
+        a_text(192 - a_text_w(2, b), 126, 2, b);
+        a_text(8, 144, 2, meteo_texte(meteo_dem_code));
+        if (meteo_dem_pluie >= 0) {
+            snprintf(b, sizeof(b), "PLUIE %d%%", meteo_dem_pluie);
+            a_text(192 - a_text_w(2, b), 144, 2, b);
+        }
+    } else {
+        a_text(192 - a_text_w(2, "--"), 126, 2, "--");
+    }
 }
 
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */
@@ -1726,8 +1759,11 @@ static void timers_charge(void)
     nvs_get_blob(nh, "timers", timers, &sz);
     nvs_close(nh);
     /* nettoyage : on garde ce qui est encore a venir, on jette le reste
-       (une echeance doit tomber dans une plage plausible : 2024 .. 2100) */
+       (une echeance doit tomber dans une plage plausible : 2024 .. 2100).
+       Si l'horloge n'est pas encore synchro (demarrage sans wifi), on ne juge
+       rien : sinon tous les rappels enregistres etaient effaces au boot. */
     time_t now = time(NULL);
+    if ((int64_t)now < 1700000000LL) return;
     for (int i = 0; i < TIMER_MAX; i++) {
         int64_t f = timers[i].fin_s;
         if (f == 0) continue;
@@ -1747,6 +1783,41 @@ static void timers_sauve(void)
     }
 }
 static void timers_sauve(void);
+
+/* ---- RAPPEL DEMANDE PAR L'ASSISTANT ----
+   Le modele ne touche pas aux GPIO : il demande un rappel (duree + 3 mots) et
+   la carte en fait un timer nomme. A l'echeance, carillon + voix (timer_sonne). */
+static int  rappel_nb = 0;                 /* rappels crees depuis le demarrage */
+static char rappel_dernier[48] = "";       /* le dernier, pour /state */
+static bool rappel_ce_tour = false;        /* un seul rappel par question */
+
+static int rappel_ajoute(int d, const char *nom)
+{
+    if (d < 10) d = 10;                            /* moins de 10 s : inutile */
+    if (d > 7 * 24 * 3600) d = 7 * 24 * 3600;      /* une semaine, pas plus */
+    if (!nom || !*nom) nom = "rappel";
+    if ((int64_t)time(NULL) < 1700000000LL) {      /* pas d'heure = pas d'echeance */
+        ESP_LOGW(TAG, "rappel refuse : horloge pas encore a l'heure (pas de wifi ?)");
+        return -1;
+    }
+    for (int i = 0; i < TIMER_MAX; i++) {
+        if (timers[i].fin_s) continue;
+        timers[i].fin_s     = (int64_t)time(NULL) + (int64_t)d;
+        timers[i].duree_s   = d;
+        snprintf(timers[i].nom, sizeof(timers[i].nom), "%.19s", nom);
+        timers[i].est_alarme = false;
+        timers[i].repet      = false;
+        timers[i].sonne      = false;
+        timers_sauve();
+        rappel_nb++;
+        snprintf(rappel_dernier, sizeof(rappel_dernier), "%.40s", nom);
+        ESP_LOGI(TAG, "rappel cree : '%s' dans %d s (timer %d, %d/%d pris)",
+                 timers[i].nom, d, i, rappel_nb, TIMER_MAX);
+        return i;
+    }
+    ESP_LOGW(TAG, "rappel refuse : les %d timers sont deja pris", TIMER_MAX);
+    return -1;
+}
 
 /* La carte n'a pas de capteur de courant (seulement des pins d'alimentation) :
    on additionne ce qui consomme vraiment, mesure par mesure. */
@@ -1999,13 +2070,12 @@ static void timer_sonne(int i)
     ui_page = PAGE_MAITRE;
     timer_sel = i;
     timer_mode = 0;
-    ui_beep(); ui_beep(); ui_beep(); ui_beep();
+    /* carillon puis voix, comme le rendez-vous : des bips et un demarrage de
+       radio (desactivee) ne s'entendaient pas. La phrase dit le nom du rappel. */
+    snprintf(annonce_txt, sizeof(annonce_txt), "Rappel : %.60s.", timers[i].nom);
+    alarme_t0 = esp_timer_get_time();
+    alarme_on = true;
     show_ui();
-    /* on allume FG Radio comme pour le minuteur radio */
-    for (int k = 0; k < radios_n; k++)
-        if (nom_contient(radios_nom[k], "FG Radio")) { radio_sel = k; break; }
-    if (radio_vol < 80) radio_vol_regle(80, 1);
-    radio_joue();
 }
 
 static void radio_stop(void)
@@ -2135,15 +2205,15 @@ static void draw_app_timer(void)
     if (sonne >= 0) sel = sonne;
     else if (n > 0) sel = 0;
 
-    if (min_preset_s > 0) snprintf(b2, sizeof(b2), "DUREE CHOISIE %d MIN", (int)(min_preset_s / 60));
-    else                  snprintf(b2, sizeof(b2), "DUREE : ARRET");
+    if (min_preset_s > 0) snprintf(b2, sizeof(b2), "DUREE %d MIN (LONG 2)", (int)(min_preset_s / 60));
+    else                  snprintf(b2, sizeof(b2), "DUREE 5 MIN (LONG 2)");
 
     if (sonne >= 0) {
-        snprintf(b1, sizeof(b1), "N'IMPORTE QUEL APPUI ARRETE");
-        ui_ecran_timer("TIMER", "CA SONNE !", pn, ps, pct, n, sel, b1, b2);
+        snprintf(b1, sizeof(b1), "UN APPUI ARRETE");
+        ui_ecran_timer("RAPPELS", "CA SONNE !", pn, ps, pct, n, sel, b1, b2);
     } else {
-        snprintf(b1, sizeof(b1), "LONG 1 = AJOUTE   LONG 2 = DUREE");
-        ui_ecran_timer("TIMER", "", pn, ps, pct, n, sel, b1, b2);
+        snprintf(b1, sizeof(b1), "LONG 1 = AJOUTE");
+        ui_ecran_timer("RAPPELS", "", pn, ps, pct, n, sel, b1, b2);
     }
 }
 
@@ -2422,6 +2492,9 @@ static void sys_ko(char *b, size_t n, uint32_t ko)
 static const char *wifi_ssid_i(int i);
 static void wifi_secours(void);
 static void wifi_retour_principal(void);
+static EventGroupHandle_t wifi_eg;
+#define WIFI_OK_BIT BIT0
+static void time_sync(void);
 static bool reg_valide(void);
 static bool reg_scan_encours(void);
 static int  reg_scan_n(void);
@@ -2593,9 +2666,12 @@ static void draw_app_sys(void)
     char b[64], v[80];
     int pct;
 
-    /* ---- en-tete ---- */
+    /* ---- en-tete : la borne wifi a droite (l'accueil n'a plus cette info) ---- */
     a_text(6, 2, 3, "SYSTEM");
-    a_text(194 - a_text_w(2, "GPU AUCUN"), 6, 2, "GPU AUCUN");
+    {
+        const char *w = wifi_actif[0] ? wifi_actif : "HORS LIGNE";
+        a_text(194 - a_text_w(2, w), 6, 2, w);
+    }
     a_hline(4, 195, 19, 1);
 
     /* ---- CPU : le gros chiffre d'abord, c'est ce qu'on lit de loin ---- */
@@ -2766,6 +2842,8 @@ static void show_ui(void)
         fb_oy = 0;
         switch (ui_page) {
         case PAGE_MAITRE:  anim_ph++; draw_app_maitre();  break;
+        case PAGE_METEO:   draw_app_meteo();  break;
+        case PAGE_TIMER:   draw_app_timer();  break;
         case PAGE_SYS:     draw_app_sys();    break;
         case PAGE_HIST:    draw_app_hist();   break;
         case PAGE_REG:     draw_app_reglages(); break;
@@ -3231,6 +3309,26 @@ static void bouton_long(int n, int tres_long)
     if (rep_bouton_long(n)) return;
     if (ui_page == PAGE_HIST) { hist_vue = 0; show_ui(); return; }   /* revenir au plus recent */
     if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
+    if (ui_page == PAGE_TIMER) {
+        /* l'app RAPPELS a ses deux gestes propres, sinon la page ne servirait
+           qu'a regarder : LONG 1 cree le timer de la duree choisie, LONG 2
+           fait defiler la duree (5, 10, 15, 30, 60 min). */
+        if (n == 0) {
+            int d = (min_preset_s > 0) ? min_preset_s : 300;
+            if (rappel_ajoute(d, "Timer") >= 0)
+                ESP_LOGI(TAG, "timer cree au bouton : %d min", d / 60);
+        } else {
+            if      (min_preset_s == 0)     min_preset_s = 300;
+            else if (min_preset_s == 300)   min_preset_s = 600;
+            else if (min_preset_s == 600)   min_preset_s = 900;
+            else if (min_preset_s == 900)   min_preset_s = 1800;
+            else if (min_preset_s == 1800)  min_preset_s = 3600;
+            else                            min_preset_s = 300;
+            ESP_LOGI(TAG, "duree choisie : %d min", min_preset_s / 60);
+        }
+        show_ui();
+        return;
+    }
     /* appui long, les deux boutons : retour a l'accueil et arret de ce qui
        tourne. Il ne lance plus l'assistant : c'est le double appui du bouton 1. */
     (void)n;
@@ -3343,10 +3441,12 @@ static void button_task(void *arg)
                 bouton_court(i);
             }
         }
-        /* sonnerie : n'importe quel appui l'arrete */
+        /* sonnerie : n'importe quel appui l'arrete (carillon et annonce compris) */
         if (timer_mode == 0 && timers[timer_sel].sonne && (last[0] == 0 || last[1] == 0)) {
             timers[timer_sel].sonne = false;
             timers[timer_sel].fin_s = 0;
+            alarme_on = false;
+            annonce_txt[0] = 0;
             radio_stop();
             timers_sauve();
             show_ui();
@@ -3358,6 +3458,32 @@ static void button_task(void *arg)
 /* /bouton?n=0&m=court  -> simule un appui (verification a distance)
    /bouton?n=1&m=long   -> appui long
    /bouton?p=2          -> force la page 2 (0..3)                     */
+/* /rappel?d=600&n=Cuisson -> cree un rappel (test a distance : c'est le meme
+   chemin que le champ "rappel" du modele). /rappel?a=1 coupe la sonnerie. */
+static esp_err_t h_rappel(httpd_req_t *req)
+{
+    char v[32] = "";
+    int  i = -1;
+    if (qval(req, "a", v, sizeof(v)) == ESP_OK && v[0]) {
+        alarme_on = false;
+        annonce_txt[0] = 0;
+        for (int k = 0; k < TIMER_MAX; k++) timers[k].sonne = false;
+        timers_sauve();
+    } else {
+        int d = 300;
+        qval(req, "d", v, sizeof(v)); if (v[0]) d = atoi(v);
+        char nom[24] = "rappel";
+        qval(req, "n", nom, sizeof(nom));
+        i = rappel_ajoute(d, nom);
+    }
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "timer", i);
+    cJSON_AddNumberToObject(r, "rappel_nb", rappel_nb);
+    cJSON_AddStringToObject(r, "rappel_dernier", rappel_dernier);
+    cJSON_AddBoolToObject(r, "alarme", alarme_on);
+    return send_json(req, r);
+}
+
 /* /alarme?t=1 declenche la sonnerie tout de suite (pour l'ecouter sans
    attendre un rendez-vous) ; sans parametre, elle s'arrete */
 static esp_err_t h_alarme(httpd_req_t *req)
@@ -3533,6 +3659,7 @@ static void pet_task(void *arg)
 }
 
 /* rafraichit l'horloge de la barre toutes les minutes */
+static volatile int ui_ticks = 0;      /* tours de la tache ui : 0 = tache morte */
 static void ui_task(void *arg)
 {
     int last_min = -1;
@@ -3540,6 +3667,7 @@ static void ui_task(void *arg)
     int derniere_meteo = -100000;      /* -> premiere mesure tout de suite */
     int dernieres_infos = -100000;
     for (;;) {
+        ui_ticks++;
         time_t now = time(NULL);
         struct tm ti;
         localtime_r(&now, &ti);
@@ -3553,15 +3681,21 @@ static void ui_task(void *arg)
                                        image, donc un seul clignotement */
             show_ui();
         }
-        /* la meteo : au demarrage puis toutes les 15 min */
-        if ((int)now - derniere_meteo >= METEO_PERIODE_S) {
+        /* la meteo : des que le reseau est la, puis toutes les 15 min.
+           Le test du wifi est ici et pas dans meteo_lire() : sinon la premiere
+           tentative (au demarrage, avant l'IP) consommait le creneau et la page
+           restait vide un quart d'heure. */
+        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
+            (int)now - derniere_meteo >= METEO_PERIODE_S) {
             derniere_meteo = (int)now;
-            meteo_lire();
-            if (ui_page == PAGE_MAITRE) show_ui();
+            bool meteo_ok_lu = meteo_lire();
+            if (!meteo_ok_lu) derniere_meteo = (int)now - (METEO_PERIODE_S - 60);  /* reessai dans 1 min */
+            if (ui_page == PAGE_MAITRE || ui_page == PAGE_METEO) show_ui();
         }
         /* les titres du moment : au demarrage puis toutes les 30 min, pour que
            le cerveau ait l'actualite du jour dans son contexte. */
-        if ((int)now - dernieres_infos >= 1800) {
+        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
+            (int)now - dernieres_infos >= 1800) {
             dernieres_infos = (int)now;
             infos_lire();
         }
@@ -3574,6 +3708,13 @@ static void ui_task(void *arg)
            (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
         wifi_secours();
         wifi_retour_principal();
+        /* le wifi est revenu apres un demarrage sans reseau : on prend l'heure
+           (sans elle, les rappels et le calendrier n'ont pas de reference) */
+        if (!heure_syncee && (xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) {
+            time_sync();
+            heure_syncee = true;
+            show_ui();
+        }
         ms_boucle();          /* calendrier : une passe par minute */
         if (ui_page == PAGE_SYS) sys_page_entre();
         else                     sys_page_sort();
@@ -3802,8 +3943,7 @@ static void storage_sd_charge(void)
 /* ------------------------------------------------------------------ */
 /* WiFi + heure                                                        */
 /* ------------------------------------------------------------------ */
-static EventGroupHandle_t wifi_eg;
-#define WIFI_OK_BIT BIT0
+/* wifi_eg et WIFI_OK_BIT sont declares plus haut (l'ui_task en a besoin) */
 static int retry_count = 0;
 
 /* on ne garde que les SSID non vides : un secours qui n'existe pas fait perdre
@@ -4350,8 +4490,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     }
     /* en PSRAM : la pile de la tache appelante est trop petite pour 1 Ko de plus
        (plantage immediat sinon, deja vecu avec sys/memtxt). */
-    char *tail = (char *)heap_caps_malloc(260, MALLOC_CAP_SPIRAM);
-    char *regles = (char *)heap_caps_malloc(700, MALLOC_CAP_SPIRAM);
+    char *tail = (char *)heap_caps_malloc(420, MALLOC_CAP_SPIRAM);
+    char *regles = (char *)heap_caps_malloc(1000, MALLOC_CAP_SPIRAM);
     if (!tail || !regles) {
         if (tail) free(tail);
         if (regles) free(regles);
@@ -4375,12 +4515,12 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     /* Les regles changent selon la passe : quand la recherche est faite, on ne
        parle plus du tout du champ "cherche", sinon le modele relance en boucle. */
     if (web_faite)
-        snprintf(regles, 700,
+        snprintf(regles, 1000,
                  "REGLES : les RESULTATS DE RECHERCHE WEB ci-dessus sont la seule verite. "
                  "Je ne cherche plus rien. Je reponds la question posee, en deux phrases "
                  "maximum, tiree de ces resultats.\n");
     else
-        snprintf(regles, 700,
+        snprintf(regles, 1000,
                  "REGLES : je ne raconte jamais ma vie, mes capacites, mes reglages. "
                  "Je n'annonce pas ce que je vais faire : je reponds. "
                  "La meteo (maintenant et demain) et les TITRES DU MOMENT sont deja dans "
@@ -4389,22 +4529,28 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                  "changer, je mets une requete dans \"cherche\" (2 a 6 mots) et \"dit\" vide, "
                  "au lieu d'inventer. "
                  "Si la question renvoie a un echange precedent, je mets 2 a 4 mots dans "
-                 "\"souvien\" et \"dit\" vide, au lieu de repondre de memoire.\n");
+                 "\"souvien\" et \"dit\" vide, au lieu de repondre de memoire. "
+                 "Si on me demande de rappeler quelque chose plus tard (dans X minutes, dans "
+                 "une heure, a 15h30), je mets la duree en SECONDES et 3 mots dans \"rappel\", "
+                 "et je confirme en une phrase courte en donnant l'heure. L'heure actuelle est "
+                 "dans le CONTEXTE : je calcule la duree a partir d'elle, sans demander.\n");
     if (web_faite) {
         /* plus de champ "cherche" du tout : le modele ne peut pas relancer */
         if (radio_actif)
-            snprintf(tail, 260,
+            snprintf(tail, 420,
                      ",\"radio\":\"<facultatif: station exacte, stop, next>\",\"volume\":<0 a 100>");
         else
             tail[0] = 0;
     } else if (radio_actif)
-        snprintf(tail, 260,
+        snprintf(tail, 420,
                  ",\"radio\":\"<facultatif: station exacte, stop, next>\",\"volume\":<0 a 100>"
-                 ",\"cherche\":\"<2 a 6 mots pour le web, si tu as besoin>\"");
-    else
-        snprintf(tail, 260,
                  ",\"cherche\":\"<2 a 6 mots pour le web, si tu as besoin>\""
-                 ",\"souvien\":\"<2 a 4 mots, si la question renvoie a un echange passe>\"");
+                 ",\"rappel\":{\"d\":<duree en secondes>,\"n\":\"<3 mots>\"}");
+    else
+        snprintf(tail, 420,
+                 ",\"cherche\":\"<2 a 6 mots pour le web, si tu as besoin>\""
+                 ",\"souvien\":\"<2 a 4 mots, si la question renvoie a un echange passe>\""
+                 ",\"rappel\":{\"d\":<duree en secondes>,\"n\":\"<3 mots>\"}");
 
     snprintf(sys, 12000,
              "%.1200s\n"
@@ -4572,12 +4718,26 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                 cJSON *jvol = cJSON_GetObjectItem(p, "volume");
                 cJSON *jch  = cJSON_GetObjectItem(p, "cherche");
                 cJSON *jsv  = cJSON_GetObjectItem(p, "souvien");
+                cJSON *jrap = cJSON_GetObjectItem(p, "rappel");
                 if (cJSON_IsString(jsv))
                     snprintf(dernier_souvien, sizeof(dernier_souvien), "%.60s", jsv->valuestring);
                 if (cJSON_IsString(jch))
                     snprintf(dernier_cherche, sizeof(dernier_cherche), "%.90s", jch->valuestring);
                 if (cJSON_IsString(jradio)) snprintf(radio_ordre, sizeof(radio_ordre), "%.38s", jradio->valuestring);
                 if (cJSON_IsNumber(jvol))   vol_ordre = (int)jvol->valuedouble;
+                /* "rappel" : la seule action materielle que le modele peut demander.
+                   On ne lui donne pas la main sur autre chose : la carte valide la
+                   duree (10 s .. 7 jours) et cree un timer nomme. Un par question. */
+                if (cJSON_IsObject(jrap) && !rappel_ce_tour) {
+                    cJSON *jdur = cJSON_GetObjectItem(jrap, "d");
+                    cJSON *jnom = cJSON_GetObjectItem(jrap, "n");
+                    int d = cJSON_IsNumber(jdur) ? (int)jdur->valuedouble : 0;
+                    char nom[24] = "rappel";
+                    if (cJSON_IsString(jnom) && jnom->valuestring[0])
+                        snprintf(nom, sizeof(nom), "%.19s", jnom->valuestring);
+                    if (d > 0 && rappel_ajoute(d, nom) >= 0) rappel_ce_tour = true;
+                    else if (d <= 0) ESP_LOGW(TAG, "rappel ignore : duree absente ou nulle");
+                }
                 if (cJSON_IsString(je) && cJSON_IsString(jd)) {
                     snprintf(out_emo, emo_sz, "%s", je->valuestring);
                     snprintf(out_dit, dit_sz, "%s", jd->valuestring);
@@ -4802,6 +4962,7 @@ static esp_err_t ds_cerveau(const char *user_text, char *out_dit, size_t dit_sz,
 {
     dernier_cherche[0] = 0;
     dernier_souvien[0] = 0;
+    rappel_ce_tour = false;               /* un seul rappel par question, deux passes comprises */
     web_contexte = NULL;
     souv_contexte = NULL;
     esp_err_t e = ds_chat(user_text, out_dit, dit_sz, out_emo, emo_sz);
@@ -6183,6 +6344,8 @@ static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
 /* va chercher les titres du moment et les met en forme pour l'ecran */
 static void infos_lire(void)
 {
+    /* idem meteo : sans reseau, on sort au lieu de bloquer la tache ui */
+    if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) return;
     if (!infos_xml) {
         infos_xml = (char *)heap_caps_malloc(64 * 1024, MALLOC_CAP_SPIRAM);
         if (!infos_xml) {
@@ -6691,20 +6854,25 @@ static void voix_tour(const uint8_t *pcm, int len)
 }
 
 /* ---- meteo (Open-Meteo) : remise a jour par ui_task ---- */
-static void meteo_lire(void)
+static bool meteo_lire(void)
 {
+    /* pas de reseau : on ne tente pas un TLS de 20 s, la tache ui resterait
+       bloquee et l'ecran (et les boutons) avec elle */
+    if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) return false;
     static uint8_t buf[2048];
     int r = http_get(METEO_URL, NULL, buf, sizeof(buf) - 1);
-    if (r <= 0) { ESP_LOGW(TAG, "meteo injoignable (%d)", r); return; }
+    if (r <= 0) { ESP_LOGW(TAG, "meteo injoignable (%d)", r); return false; }
     buf[r] = 0;
     cJSON *j = cJSON_Parse((char *)buf);
     cJSON *cur = j ? cJSON_GetObjectItem(j, "current") : NULL;
     cJSON *t = cur ? cJSON_GetObjectItem(cur, "temperature_2m") : NULL;
     cJSON *w = cur ? cJSON_GetObjectItem(cur, "weather_code") : NULL;
+    bool ok = false;
     if (cJSON_IsNumber(t) && cJSON_IsNumber(w)) {
         meteo_temp = (float)t->valuedouble;
         meteo_code = (int)w->valuedouble;
         meteo_ok = true;
+        ok = true;
         ESP_LOGI(TAG, "meteo %s : %.1f C, code %d", METEO_VILLE, (double)meteo_temp, meteo_code);
     }
     /* demain (index 1 des tableaux daily) */
@@ -6730,6 +6898,7 @@ static void meteo_lire(void)
         }
     }
     if (j) cJSON_Delete(j);
+    return ok;
 }
 
 static const char *meteo_texte(int code)
@@ -8003,9 +8172,12 @@ static void alarme_task(void *arg)
         if (frames > 0) { audio_play_mono(frames); alarme_jouee++; }
         if (!alarme_on) continue;               /* coupee pendant le carillon */
 
-        /* 2. la voix annonce le rendez-vous */
+        /* 2. la voix annonce : le rappel du timer, sinon le rendez-vous */
         char phrase[160];
-        if (ms_dans >= 0 && ms_dans <= ALARME_MIN + 5 && (ms_org[0] || ms_titre[0]))
+        if (annonce_txt[0]) {
+            snprintf(phrase, sizeof(phrase), "%s", annonce_txt);
+            annonce_txt[0] = 0;                 /* une seule annonce par echeance */
+        } else if (ms_dans >= 0 && ms_dans <= ALARME_MIN + 5 && (ms_org[0] || ms_titre[0]))
             snprintf(phrase, sizeof(phrase), "Rendez-vous dans %d minutes avec %s.",
                      ms_dans, ms_org[0] ? ms_org : ms_titre);
         else if (ms_org[0] || ms_titre[0])
@@ -8090,6 +8262,21 @@ static void mino_handle_line(const char *line)
                  (unsigned)(pet.age_s / 86400), pet_sante(&pet),
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), sd_ok ? "oui" : "non");
+        return;
+    }
+    if (!strcmp(line, "diag")) {
+        /* tout ce qu'on ne peut pas lire sans reseau : etat reel de la tache ui,
+           du wifi, de la meteo et des rappels */
+        ESP_LOGI(TAG, "diag : ui_ticks=%d wifi=%d '%s' meteo=%d %.1fC code=%d dem=%d pluie=%d",
+                 ui_ticks, (xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) ? 1 : 0, wifi_actif,
+                 meteo_ok ? 1 : 0, (double)meteo_temp, meteo_code, meteo_dem_code, meteo_dem_pluie);
+        int nt = 0;
+        for (int i = 0; i < TIMER_MAX; i++) if (timers[i].fin_s) nt++;
+        ESP_LOGI(TAG, "diag : rappel_nb=%d dernier='%s' alarme=%d jouee=%d timers_actifs=%d",
+                 rappel_nb, rappel_dernier, alarme_on ? 1 : 0, alarme_jouee, nt);
+        ESP_LOGI(TAG, "diag : heap_int_max=%u psram=%u",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         return;
     }
     if (!strcmp(line, "memo")) {
@@ -9047,6 +9234,9 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddBoolToObject(r, "alarme", alarme_on);
     cJSON_AddNumberToObject(r, "alarme_min", ALARME_MIN);
     cJSON_AddNumberToObject(r, "alarme_jouee", alarme_jouee);
+    cJSON_AddNumberToObject(r, "rappel_nb", rappel_nb);
+    cJSON_AddStringToObject(r, "rappel_dernier", rappel_dernier);
+    cJSON_AddStringToObject(r, "annonce", annonce_txt);
     cJSON_AddNumberToObject(r, "cal_dans", ms_dans);
     cJSON_AddItemToObject(r, "boutons", btn_etat_json());
     cJSON_AddBoolToObject(r, "wifi_enregistre", wifi_rt ? 1 : 0);
@@ -9339,6 +9529,7 @@ static void api_start(void)
     u.handler = h_timer; u.uri = "/timer"; httpd_register_uri_handler(srv, &u);
     u.handler = h_bouton; u.uri = "/bouton"; httpd_register_uri_handler(srv, &u);
     u.handler = h_alarme; u.uri = "/alarme"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_rappel; u.uri = "/rappel"; httpd_register_uri_handler(srv, &u);
     u.handler = h_parle; u.uri = "/parle"; httpd_register_uri_handler(srv, &u);
     u.handler = h_dit;   u.uri = "/dit";   httpd_register_uri_handler(srv, &u);
     u.handler = h_hist;  u.uri = "/hist";  httpd_register_uri_handler(srv, &u);
@@ -9493,8 +9684,18 @@ extern "C" void app_main(void)
     if (!resp_buf) ESP_LOGE(TAG, "pas de PSRAM pour la reponse");
 
     wifi_start();
-    xEventGroupWaitBits(wifi_eg, WIFI_OK_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
-    time_sync();
+    /* On n'attend le wifi que 20 s. Avant, c'etait portMAX_DELAY : sans borne,
+       RIEN ne demarrait (serveur web, boutons, ecran, alarme) et la carte
+       restait figee sur sa premiere image — c'etait le bug "plus de wifi =
+       tout se fige". Le wifi continue ses tentatives en tache de fond. */
+    bool wifi_pret = (xEventGroupWaitBits(wifi_eg, WIFI_OK_BIT, pdFALSE, pdTRUE,
+                                          pdMS_TO_TICKS(20000)) & WIFI_OK_BIT) != 0;
+    if (wifi_pret) {
+        time_sync();
+        heure_syncee = true;
+    } else {
+        ESP_LOGW(TAG, "wifi absent apres 20 s : demarrage quand meme (il se connectera tout seul)");
+    }
 
     api_start();
     xTaskCreate(serial_task, "console", 6144, NULL, 4, NULL);

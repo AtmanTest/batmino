@@ -46,10 +46,34 @@ bouton 2, lui, part tout de suite (il n'a pas de double appui).
 
 Testable à distance : `/bouton?n=0|1&m=court|long|double`.
 
-Pages du cycle : ACCUEIL (0, tableau de bord), SYSTEM (1, cpu/ram/watts),
-HISTORIQUE (2, les derniers échanges). La page RÉGLAGES existe encore dans le
-code mais n'est plus dans le cycle (jugée mal faite) : elle reste joignable par
-`/reglages` et `/wifi` (et garde ses gestes propres pour le clavier).
+Pages du cycle, une appli par page (comme les premières versions) :
+
+    ACCUEIL    l'heure, la date, le prochain rendez-vous, le compagnon
+    METEO      le ciel maintenant (température en gros, état) et demain
+               (min/max, pluie) ; « PAS DE DONNEES » s'il n'y a pas de wifi
+    RAPPELS    les minuteurs et rappels en cours (nom, temps, anneau).
+               LONG 1 = ajoute un rappel de la durée choisie, LONG 2 = change
+               la durée (5, 10, 15, 30, 60 min), un appui coupe la sonnerie
+    SYSTEM     cpu, ram, psram, watts, réseau (nom de la borne en haut à
+               droite), carte SD et flash
+    HISTORIQUE les derniers échanges lus sur la carte
+
+La page RÉGLAGES existe encore dans le code mais n'est plus dans le cycle
+(jugée mal faite) : elle reste joignable par `/reglages` et `/wifi` (et garde
+ses gestes propres pour le clavier).
+
+## L'assistant peut créer un rappel
+
+Le modèle n'a pas la main sur le matériel : le seul ordre qu'il peut donner est
+un rappel, et la carte le valide. Sa réponse JSON accepte
+`"rappel":{"d":<secondes>,"n":"<3 mots>"}` ; le firmware vérifie la durée
+(10 s à 7 jours), en fait un minuteur nommé et, à l'échéance, joue le carillon
+puis la voix (« Rappel : sortir le linge. »). Un rappel par question.
+
+Sans wifi, l'heure n'est pas synchronisée : le rappel est refusé proprement
+plutôt que créé avec une échéance fausse. Preuves à distance : `/rappel?d=600&n=test`
+(crée), `/rappel?a=1` (coupe la sonnerie), `/state` -> `rappel_nb`,
+`rappel_dernier`, `annonce`.
 
 En plus : la **page REPONSE**, éphémère. Dès qu'une réponse arrive, elle prend
 tout l'écran, en plusieurs pages si besoin (24 signes × 10 lignes en corps 2,
