@@ -3449,15 +3449,17 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
     /* navigation : 1 = page suivante, 2 = page precedente.
        Une dalle e-paper met ~1 s a se rafraichir : enchainer les appuis plus
        vite que ca laisse la dalle en BUSY, elle se met en panne et l'ecran
-       s'eteint. On ignore donc les appuis trop rapproches. */
+       s'eteint. On ATTEND donc que la dalle soit prete au lieu de jeter
+       l'appui : perdre un appui donnait « la page ne change pas ». */
     {
         static int64_t dernier_changement = 0;
         int64_t t = esp_timer_get_time() / 1000;
         if (dernier_changement && t - dernier_changement < 1200) {
-            ESP_LOGW(TAG, "page : appui trop rapide, ignore (dalle occupee)");
-            return;
+            int64_t reste = 1200 - (t - dernier_changement);
+            ESP_LOGW(TAG, "page : appui rapproche, on attend %d ms", (int)reste);
+            vTaskDelay(pdMS_TO_TICKS(reste));
         }
-        dernier_changement = t;
+        dernier_changement = esp_timer_get_time() / 1000;
     }
     ui_page = (n == 0) ? (ui_page + 1) % PAGE_COUNT
                        : (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;

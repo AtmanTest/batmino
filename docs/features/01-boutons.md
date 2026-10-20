@@ -37,8 +37,9 @@ Rejoués par `tools/test_global.py` (section 2), et à la main par la console US
 
 | Test | Attendu |
 |---|---|
-| `btn 1` cinq fois depuis ACCUEIL | METEO, RAPPELS, SYSTEM, HISTORIQUE, ACCUEIL |
-| `btn 2` depuis ACCUEIL | HISTORIQUE |
+| `btn 1` six fois depuis ACCUEIL | METEO, RAPPELS, SYSTEM, HISTORIQUE, YOUTUBE, ACCUEIL |
+| `btn 2` depuis ACCUEIL | YOUTUBE |
 | `btn 1 long` depuis n'importe où | ACCUEIL |
-| deux `btn 1` à moins de 1,2 s | le second répond `(ignore)` |
+| deux `btn 1` à moins de 1,2 s | l'appui est **attendu**, la page change quand même (`appui rapproche, on attend … ms`) |
+| 14 appuis à 1,6 s d'intervalle | 14 changements de page, aucun perdu |
 | appui simple du bouton 1 | ne lance **jamais** l'assistant |
