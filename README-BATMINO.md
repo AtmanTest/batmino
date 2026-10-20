@@ -28,28 +28,35 @@ PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
 
 ## Interface : deux boutons, quatre gestes
 
-    APPUI COURT bouton 1 : lance la tache de l'ecran courant
-                           (accueil/parler -> chat vocal, radio -> jouer/arreter,
-                            minuteur -> creer/valider)
-    APPUI COURT bouton 2 : abandonne la tache en cours (l'ecoute est coupee
-                           proprement) et passe a la page suivante ; sur la
-                           derniere page, retour a l'accueil
-    APPUI LONG           : reserve, pas encore d'action
-    DOUBLE APPUI         : detecte (< 400 ms) et reserve pour la suite, sans
-                           rejouer l'action de l'appui simple
+    DOUBLE APPUI bouton 1 : LE SEUL geste qui lance l'assistant (chat vocal),
+                            depuis n'importe quelle page. La fenêtre pour
+                            enchaîner les deux appuis est de 320 ms.
+    APPUI COURT bouton 1  : page SUIVANTE (1 = suite dans la page REPONSE)
+    APPUI COURT bouton 2  : page PRÉCÉDENTE (2 = avant dans la page REPONSE)
+    APPUI LONG (1 ou 2)   : retour à l'accueil et arrêt de ce qui tourne
 
-Testable a distance : `/bouton?n=0|1&m=court|long|double`.
+    Pendant une tâche (écoute, radio, voix), un appui simple — l'un ou l'autre
+    bouton — l'arrête et ramène à l'accueil au lieu de tourner la page.
+    La page HISTORIQUE garde son défilement sur le bouton 1 (messages plus
+    anciens) ; l'appui long y revient au plus récent.
+
+L'appui simple du bouton 1 est retenu 320 ms avant d'être exécuté : c'est la
+seule façon de ne pas tourner la page juste avant de lancer l'assistant. Le
+bouton 2, lui, part tout de suite (il n'a pas de double appui).
+
+Testable à distance : `/bouton?n=0|1&m=court|long|double`.
 
 Pages du cycle : ACCUEIL (0, tableau de bord), SYSTEM (1, cpu/ram/watts),
 HISTORIQUE (2, les derniers échanges). La page RÉGLAGES existe encore dans le
 code mais n'est plus dans le cycle (jugée mal faite) : elle reste joignable par
-`/reglages` et `/wifi`.
+`/reglages` et `/wifi` (et garde ses gestes propres pour le clavier).
 
 En plus : la **page REPONSE**, éphémère. Dès qu'une réponse arrive, elle prend
 tout l'écran, en plusieurs pages si besoin (24 signes × 10 lignes en corps 2,
-donc jusqu'à ~5 pages). Bouton 2 = page suivante, puis fermeture après la
-dernière ; bouton 1 = fermer. Le texte affiché est translittéré en ASCII (la
-dalle ne connaît pas les accents : « OXYGÈNE » devenait « OXYGNE »).
+donc jusqu'à ~5 pages). Bouton 1 = page suivante, bouton 2 = page précédente ;
+au bout d'un côté, un appui de plus ferme la réponse (l'appui long ferme
+toujours). Le texte affiché est translittéré en ASCII (la dalle ne connaît pas
+les accents : « OXYGÈNE » devenait « OXYGNE »).
 
 ## Le tamagotchi (moteur local, déterministe)
 

@@ -120,13 +120,23 @@ chmod 600) ET colle en premiere ligne de `LIRE-D-ABORD.md` sur la cle MINO-ESP32
 Ne jamais repondre "il n'y a pas de token" sans avoir teste : `curl -H "Authorization: Bearer <t>" https://api.github.com/user`
 renvoie 401 pour un token revoque, ce qui distingue "absent" de "mort".
 
-## Boutons (v0.4)
+## Boutons (v0.8)
 
-    bouton 1 (BOOT, GPIO0) appui court : lance la tache de la page
-        accueil/parler -> chat vocal ; radio -> jouer/arreter ; timer -> creer/valider
-    bouton 2 (PWR, GPIO18) appui court : quitte la tache et revient a l'accueil,
-        sinon page suivante ; en edition timer : +1 min
-    double appui (< 400 ms) : detecte, reserve (bouton_double) ; appui long : inchange
+    bouton 1 (BOOT, GPIO0) DOUBLE appui : LE SEUL geste qui lance l'assistant,
+        depuis n'importe quelle page (fenetre 320 ms)
+    bouton 1 appui court : page SUIVANTE (page REPONSE : 1 = suite)
+    bouton 2 (PWR, GPIO18) appui court : page PRECEDENTE (page REPONSE : 2 = avant)
+    appui long (les deux) : retour a l'accueil + arret de la tache
+    pendant une tache : un appui simple (1 ou 2) l'arrete et ramene a l'accueil
+
+L'appui court du bouton 1 est retenu `DOUBLE_MS` (320 ms) dans `button_task`
+avant d'etre execute, pour tous les ecrans et pas seulement le clavier : sinon
+un double appui tournait la page juste avant de lancer l'assistant. Le bouton 2
+n'a pas de double appui, il part au relachement.
+
+Sur la page HISTORIQUE le bouton 1 defile vers le passe (l'appui long revient au
+plus recent) ; le bouton 2 y sort de la page. La page REGLAGES garde ses gestes
+propres (clavier : double 1 = sauter 6 touches, double 2 = abandonner).
 
 L'abandon passe par `assist_abort` (volatile) verifie dans la boucle d'ecoute de
 assistant_wake_task : c'est le seul moyen propre de sortir d'une tache de 6 s.

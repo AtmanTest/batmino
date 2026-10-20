@@ -1261,17 +1261,19 @@ static void rep_ferme(void)
 
 static void rep_age_plus(void) { if (rep_page + 1 < rep_pages) rep_page++; }
 
-/* n : 0 = bouton 1, 1 = bouton 2 (comme partout dans le firmware) */
+/* n : 0 = bouton 1, 1 = bouton 2 (comme partout dans le firmware)
+   lecture d'une reponse longue : les DEUX boutons servent a tourner les pages
+   (1 = suite, 2 = avant) ; au bout, un appui de plus referme. */
 static bool rep_bouton_court(int n)
 {
     if (!rep_ouvert) return false;
-    if (n == 0) {                       /* bouton 1 : fermer la reponse */
-        rep_ferme();
-        show_ui();
-        return true;
+    if (n == 0) {
+        if (rep_page + 1 < rep_pages) rep_page++;   /* bouton 1 : page suivante */
+        else rep_ferme();                           /* apres la derniere : on ferme */
+    } else {
+        if (rep_page > 0) rep_page--;               /* bouton 2 : page precedente */
+        else rep_ferme();                           /* avant la premiere : on ferme */
     }
-    if (rep_page + 1 < rep_pages) rep_page++;   /* bouton 2 : page suivante */
-    else rep_ferme();                            /* apres la derniere : on ferme */
     show_ui();
     return true;
 }
@@ -1307,7 +1309,8 @@ static void draw_app_reponse(void)
         p += l;
         while (*p == ' ' || *p == '\n') p++;
     }
-    a_text_c(100, 188, 1, (rep_page + 1 < rep_pages) ? "2 = SUITE   1 = FERMER" : "1 = FERMER");
+    /* legende en corps 2 : en corps 1 elle est illisible a bout de bras */
+    a_text_c(100, 186, 2, (rep_page + 1 < rep_pages) ? "1=SUITE  2=AVANT" : "1=FERMER 2=AVANT");
 }
 
 /* ---------- 0. MAITRE : le tableau de bord ---------- */
@@ -2420,7 +2423,6 @@ static const char *wifi_ssid_i(int i);
 static void wifi_secours(void);
 static void wifi_retour_principal(void);
 static bool reg_valide(void);
-static void reg_scan_lance(void);
 static bool reg_scan_encours(void);
 static int  reg_scan_n(void);
 static const char *reg_scan_ssid(int i);
@@ -3140,12 +3142,15 @@ static void assistant_wake(void)
 }
 
 /* ---- actions des boutons, isolees : declenchables aussi par /bouton (test a distance) ----
-   MODELE (v0.4) :
-     bouton 1 (BOOT) appui COURT : lance la tache de la page.
-        accueil / parler -> chat vocal ; radio -> jouer/arreter ; timer -> creer/valider
-     bouton 2 (PWR)  appui COURT : quitte la tache en cours et revient a l'accueil ;
-        si aucune tache ne tourne, passe a la page suivante.
-     appui LONG  : inchange (contextuel) ; DOUBLE appui : detecte, reserve pour la suite. */
+   MODELE (v0.8) :
+     bouton 1 (BOOT) appui COURT   : page SUIVANTE (partout, y compris dans la
+                                     reponse en pages : 1 = suite).
+     bouton 1 (BOOT) DOUBLE appui  : LE SEUL moyen de lancer l'assistant, depuis
+                                     n'importe quelle page.
+     bouton 2 (PWR)  appui COURT   : page PRECEDENTE (2 = avant dans la reponse).
+     pendant une tache (ecoute, radio, voix) un appui simple l'arrete et ramene
+     a l'accueil, au lieu de tourner la page.
+     appui LONG (les deux)         : retour a l'accueil et arret de ce qui tourne. */
 static void bouton_long(int n, int tres_long);
 
 static void tache_arrete(void)
@@ -3163,7 +3168,7 @@ static void reg_bouton_long(int n);
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
     if (rep_bouton_court(n)) return;     /* la reponse en pages plein ecran */
-    if (ui_page == PAGE_HIST && n == 0) { /* remonter dans l'historique */
+    if (ui_page == PAGE_HIST && n == 0) { /* 1 : remonter dans l'historique (appui long = plus recent) */
         hist_vue += 3;
         if (!hist_p || hist_vue > hist.n - 1) hist_vue = (hist_p && hist.n > 0) ? hist.n - 1 : 0;
         show_ui();
@@ -3177,24 +3182,27 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         return;
     }
     if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
-    if (n == 0) {
-        assistant_wake();                 /* bouton 1 : la conversation, depuis n'importe ou */
-    } else {
-        bool tache = wake_busy || radio_etat || voix_etat;
+    /* une tache tourne : l'appui simple l'arrete au lieu de tourner la page */
+    if (wake_busy || radio_etat || voix_etat) {
         tache_arrete();
-        if (tache) ui_page = PAGE_MAITRE;            /* on sort de la tache */
-        else       ui_page = (ui_page + 1) % PAGE_COUNT;
-        if (ui_page == PAGE_REG) { reg_vue = REG_MENU; reg_ligne = 0; reg_scan_lance(); }
+        ui_page = PAGE_MAITRE;
+        ESP_LOGI(TAG, "bouton %s : tache arretee", n == 0 ? "1" : "2");
+        show_ui();
+        return;
     }
-    ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-parler" : "2-page", PAGE_NOM[ui_page]);
+    /* navigation : 1 = page suivante, 2 = page precedente */
+    ui_page = (n == 0) ? (ui_page + 1) % PAGE_COUNT
+                       : (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;
+    ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-suite" : "2-avant", PAGE_NOM[ui_page]);
     show_ui();
 }
 
 static void bouton_double(int n)
 {
-    /* sur le clavier, un double appui sur le bouton 1 saute une rangee de 6
-       touches : taper un mot de passe avec deux boutons reste long */
+    /* page REGLAGES : le clavier garde ses deux gestes (taper un mot de passe
+       avec deux boutons reste sinon interminable) */
     if (ui_page == PAGE_REG && reg_vue == REG_CLAVIER && n == 0) {
+        /* un double appui sur le bouton 1 saute une rangee de 6 touches */
         reg_sel = (reg_sel + 6) % reg_touches_n();
         show_ui();
         return;
@@ -3206,7 +3214,15 @@ static void bouton_double(int n)
         show_ui();
         return;
     }
-    ESP_LOGI(TAG, "bouton %s : double appui (reserve)", n == 0 ? "1" : "2");
+    if (n == 0) {
+        /* LE geste de l'assistant : double appui bouton 1, depuis n'importe
+           quelle page. La reponse plein ecran se referme d'abord. */
+        if (rep_ouvert) { rep_ferme(); show_ui(); }
+        ESP_LOGI(TAG, "bouton 1 : double appui -> assistant");
+        assistant_wake();
+        return;
+    }
+    ESP_LOGI(TAG, "bouton 2 : double appui (reserve)");
 }
 
 static void bouton_long(int n, int tres_long)
@@ -3215,13 +3231,12 @@ static void bouton_long(int n, int tres_long)
     if (rep_bouton_long(n)) return;
     if (ui_page == PAGE_HIST) { hist_vue = 0; show_ui(); return; }   /* revenir au plus recent */
     if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
-    if (n == 0) assistant_wake();         /* appui long 1 : je t'ecoute */
-    else {
-        /* appui long 2 : retour a l'accueil et arret de ce qui tourne.
-           Avant, il ne faisait rien du tout : on croyait le bouton casse. */
-        tache_arrete();
-        ui_page = PAGE_MAITRE;
-    }
+    /* appui long, les deux boutons : retour a l'accueil et arret de ce qui
+       tourne. Il ne lance plus l'assistant : c'est le double appui du bouton 1. */
+    (void)n;
+    tache_arrete();
+    ui_page = PAGE_MAITRE;
+    ESP_LOGI(TAG, "appui long : retour accueil");
     show_ui();
 }
 
@@ -3301,10 +3316,10 @@ static void button_task(void *arg)
                 bouton_long(i, (now - t0[i]) >= 2400000);
             } else if (!enfonce && avant) {          /* relachement */
                 if (!long_envoye[i] && now - t0[i] >= ANTI_REBOND) {
-                    /* au clavier seulement, on retient l'appui simple 320 ms :
-                       sinon un double appui faisait "touche + saut de 6" */
-                    bool clavier = (ui_page == PAGE_REG && reg_vue == REG_CLAVIER);
-                    if (clavier) {
+                    /* le bouton 1 retient toujours l'appui simple 320 ms : c'est
+                       le seul moyen de ne pas changer de page juste avant un
+                       double appui (assistant). Le bouton 2 part tout de suite. */
+                    if (i == 0) {
                         if (court_attente[i]) {
                             court_attente[i] = 0;
                             g_btn_double[i]++;
@@ -4001,7 +4016,6 @@ static void wscan_tache(void *arg)
 }
 
 /* petits accesseurs : le dessin de la page est plus haut dans le fichier */
-static void reg_scan_lance(void) { g_wscan_demande = true; }
 static bool reg_scan_encours(void) { return g_wscan_encours || g_wscan_demande; }
 static int reg_scan_n(void) { return g_wscan_n; }
 static const char *reg_scan_ssid(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].ssid : ""; }
