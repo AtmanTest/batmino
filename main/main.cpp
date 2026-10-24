@@ -308,16 +308,15 @@ static void draw_status_bar(void);
 /* une appli par page, comme les premieres versions : chaque ecran a son sujet
    et rien d'autre */
 #define PAGE_METEO  1                     /* METEO    : le ciel, aujourd'hui et demain */
-#define PAGE_TIMER  2                     /* RAPPELS  : les minuteurs et rappels en cours */
-#define PAGE_SYS    3                     /* SYSTEM   : cpu, ram, watts, reseau, stockage */
-#define PAGE_HIST   4                     /* HISTORIQUE : les derniers echanges */
-#define PAGE_YT     5                     /* YOUTUBE  : la chaine, derniere video */
-#define PAGE_CONSEIL 6                    /* CONSEIL  : ce que la carte juge utile de
+#define PAGE_SYS    2                     /* SYSTEM   : cpu, ram, watts, reseau, stockage */
+#define PAGE_HIST   3                     /* HISTORIQUE : les derniers echanges */
+#define PAGE_YT     4                     /* YOUTUBE  : la chaine, derniere video */
+#define PAGE_CONSEIL 5                    /* CONSEIL  : ce que la carte juge utile de
                                              dire maintenant (une passe de cerveau) */
-#define PAGE_REG    7                     /* REGLAGES : hors cycle (jugee mal faite),
+#define PAGE_REG    6                     /* REGLAGES : hors cycle (jugee mal faite),
                                              joignable par /reglages et le web */
-#define PAGE_COUNT  7
-static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "RAPPELS", "SYSTEM",
+#define PAGE_COUNT  6
+static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "SYSTEM",
                                            "HISTORIQUE", "YOUTUBE", "CONSEIL"};
 
 /* ---- LE CONSEIL : la seule page qui n'affiche pas une donnee mais un
@@ -1193,7 +1192,7 @@ static void app_titre(const char *nom)
     if (ui_page == PAGE_SYS)
         a_text(196 - 6 * 18, 10, 1, "BOUTON 2 = ACCUEIL");
     else if (ui_page == PAGE_CONSEIL)
-        a_text(196 - a_text_w(1, "1 = REJUGER"), 10, 1, "1 = REJUGER");
+        a_text(196 - a_text_w(1, "LONG 1 = REJUGER"), 10, 1, "LONG 1 = REJUGER");
 }
 
 static void app_bas(const char *txt)
@@ -2389,59 +2388,6 @@ static void draw_app_radio(void)
 }
 
 
-/* ===== PAGE TIMER / ALARME : liste facon iOS (le dessin est partage avec l'apercu PC) =====
-   Rappel : un appui COURT change toujours de page, un appui LONG agit.
-     LONG 1 = cree un timer (avec la duree choisie) / arrete la sonnerie
-     LONG 2 = change la duree : 5, 10, 15, 30, 60 min puis off
-     (le minuteur radio reste sur le bouton 2 des autres pages)                     */
-static void draw_app_timer(void)
-{
-    static char noms[3][48];
-    static char sous[3][48];
-    static const char *pn[3] = {noms[0], noms[1], noms[2]};
-    static const char *ps[3] = {sous[0], sous[1], sous[2]};
-    static int pct[3];
-    int n = 0, sel = -1, sonne = -1;
-    char b1[64], b2[64];
-
-    for (int i = 0; i < TIMER_MAX && n < 3; i++) {
-        if (!timers[i].fin_s) continue;
-        snprintf(noms[n], sizeof(noms[0]), "%.20s", timers[i].nom);
-        int reste = (int)(timers[i].fin_s - (int64_t)time(NULL));
-        if (reste < 0) reste = 0;
-        int total = timers[i].duree_s > 0 ? timers[i].duree_s : 1;
-        int ecoule = total - reste;
-        if (ecoule < 0) ecoule = 0;
-        pct[n] = (100 * ecoule) / total;
-        if (timers[i].sonne) {
-            snprintf(sous[n], sizeof(sous[0]), "SONNE !");
-            sonne = n;
-        } else if (timers[i].est_alarme) {
-            time_t t = (time_t)timers[i].fin_s;
-            struct tm tm;
-            localtime_r(&t, &tm);
-            snprintf(sous[n], sizeof(sous[0]), "%02d:%02d%.11s", tm.tm_hour, tm.tm_min,
-                     timers[i].repet ? " tous jours" : "");
-        } else {
-            snprintf(sous[n], sizeof(sous[0]), "%d:%02d / %d:%02d",
-                     reste / 60, reste % 60, total / 60, total % 60);
-        }
-        n++;
-    }
-    if (sonne >= 0) sel = sonne;
-    else if (n > 0) sel = 0;
-
-    if (min_preset_s > 0) snprintf(b2, sizeof(b2), "DUREE %d MIN (LONG 2)", (int)(min_preset_s / 60));
-    else                  snprintf(b2, sizeof(b2), "DUREE 5 MIN (LONG 2)");
-
-    if (sonne >= 0) {
-        snprintf(b1, sizeof(b1), "UN APPUI ARRETE");
-        ui_ecran_timer("RAPPELS", "CA SONNE !", pn, ps, pct, n, sel, b1, b2);
-    } else {
-        snprintf(b1, sizeof(b1), "LONG 1 = AJOUTE");
-        ui_ecran_timer("RAPPELS", "", pn, ps, pct, n, sel, b1, b2);
-    }
-}
 
 static char journal_lignes[12][64];
 static int  journal_n = 0, journal_tete = 0;
@@ -3074,7 +3020,6 @@ static void show_ui(void)
         switch (ui_page) {
         case PAGE_MAITRE:  anim_ph++; draw_app_maitre();  break;
         case PAGE_METEO:   draw_app_meteo();  break;
-        case PAGE_TIMER:   draw_app_timer();  break;
         case PAGE_SYS:     draw_app_sys();    break;
         case PAGE_HIST:    draw_app_hist();   break;
         case PAGE_YT:      draw_app_youtube(); break;
@@ -3495,12 +3440,6 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         return;
     }
     if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
-    /* CONSEIL : le bouton 1 ne tourne pas la page, il demande un nouveau
-       jugement (le seul geste de cette page). */
-    if (ui_page == PAGE_CONSEIL && n == 0) {
-        if (!conseil_occupe) { conseil_demande = true; ui_beep(); }
-        return;
-    }
     /* une tache tourne : l'appui simple l'arrete au lieu de tourner la page */
     if (wake_busy || radio_etat || voix_etat) {
         tache_arrete();
@@ -3566,24 +3505,10 @@ static void bouton_long(int n, int tres_long)
     if (rep_bouton_long(n)) return;
     if (ui_page == PAGE_HIST) { hist_vue = 0; show_ui(); return; }   /* revenir au plus recent */
     if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
-    if (ui_page == PAGE_TIMER) {
-        /* l'app RAPPELS a ses deux gestes propres, sinon la page ne servirait
-           qu'a regarder : LONG 1 cree le timer de la duree choisie, LONG 2
-           fait defiler la duree (5, 10, 15, 30, 60 min). */
-        if (n == 0) {
-            int d = (min_preset_s > 0) ? min_preset_s : 300;
-            if (rappel_ajoute(d, "Timer") >= 0)
-                ESP_LOGI(TAG, "timer cree au bouton : %d min", d / 60);
-        } else {
-            if      (min_preset_s == 0)     min_preset_s = 300;
-            else if (min_preset_s == 300)   min_preset_s = 600;
-            else if (min_preset_s == 600)   min_preset_s = 900;
-            else if (min_preset_s == 900)   min_preset_s = 1800;
-            else if (min_preset_s == 1800)  min_preset_s = 3600;
-            else                            min_preset_s = 300;
-            ESP_LOGI(TAG, "duree choisie : %d min", min_preset_s / 60);
-        }
-        show_ui();
+    if (ui_page == PAGE_CONSEIL) {
+        /* le geste propre de cette page, comme partout : COURT change de page,
+           LONG agit. Ici, agir = demander un nouveau jugement. */
+        if (n == 0 && !conseil_occupe) { conseil_demande = true; ui_beep(); }
         return;
     }
     /* appui long, les deux boutons : retour a l'accueil et arret de ce qui
@@ -3844,7 +3769,7 @@ static void pet_charge(void)
     }
 }
 
-/* Change de page tout seul : ACCUEIL -> METEO -> RAPPELS -> SYSTEM ->
+/* Change de page tout seul : ACCUEIL -> METEO -> SYSTEM ->
    HISTORIQUE -> YOUTUBE. C'est ce qui permet de lire l'information sans
    toucher aux boutons. On ne tourne jamais pendant que le robot travaille
    (ecoute, reflexion, reponse en pages) ni juste apres un geste : l'utilisateur

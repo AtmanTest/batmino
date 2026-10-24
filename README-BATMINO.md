@@ -61,9 +61,6 @@ Pages du cycle, une appli par page (comme les premières versions) :
     ACCUEIL    l'heure, la date, le prochain rendez-vous, le compagnon
     METEO      le ciel maintenant (température en gros, état) et demain
                (min/max, pluie) ; « PAS DE DONNEES » s'il n'y a pas de wifi
-    RAPPELS    les minuteurs et rappels en cours (nom, temps, anneau).
-               LONG 1 = ajoute un rappel de la durée choisie, LONG 2 = change
-               la durée (5, 10, 15, 30, 60 min), un appui coupe la sonnerie
     SYSTEM     cpu, ram, psram, watts, réseau (nom de la borne en haut à
                droite), carte SD et flash
     HISTORIQUE les derniers échanges lus sur la carte
@@ -76,7 +73,7 @@ ses gestes propres pour le clavier).
 
 ## Le conseil : la page qui ne repond pas, elle juge
 
-Six pages affichent une donnee. La septieme, **CONSEIL**, affiche un jugement.
+Cinq pages affichent une donnee. La sixieme, **CONSEIL**, affiche un jugement.
 Une tache de fond (`conseil`) appelle le cerveau en dehors de toute
 conversation : elle lui donne la date, le prochain rendez-vous avec son delai
 en clair, la meteo, l'etat du compagnon et la batterie, et lui demande une
@@ -84,7 +81,8 @@ seule chose — l'action la plus utile maintenant, ou RIEN.
 
     page CONSEIL      le conseil en clair, l'heure du jugement et les faits
                       qui l'ont motive (« RDV 2H10  BAT 66% »)
-    bouton 1 (court)  demande un nouveau jugement : le seul geste de la page
+    appui LONG 1      demande un nouveau jugement : le seul geste de la page
+                      (COURT reste la navigation, comme partout)
     /conseil          lit le dernier conseil en JSON (texte, faits, heure, etat)
     /conseil?o=1      force une passe
 
