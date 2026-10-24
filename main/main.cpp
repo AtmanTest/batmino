@@ -312,11 +312,30 @@ static void draw_status_bar(void);
 #define PAGE_SYS    3                     /* SYSTEM   : cpu, ram, watts, reseau, stockage */
 #define PAGE_HIST   4                     /* HISTORIQUE : les derniers echanges */
 #define PAGE_YT     5                     /* YOUTUBE  : la chaine, derniere video */
-#define PAGE_REG    6                     /* REGLAGES : hors cycle (jugee mal faite),
+#define PAGE_CONSEIL 6                    /* CONSEIL  : ce que la carte juge utile de
+                                             dire maintenant (une passe de cerveau) */
+#define PAGE_REG    7                     /* REGLAGES : hors cycle (jugee mal faite),
                                              joignable par /reglages et le web */
-#define PAGE_COUNT  6
+#define PAGE_COUNT  7
 static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "RAPPELS", "SYSTEM",
-                                           "HISTORIQUE", "YOUTUBE"};
+                                           "HISTORIQUE", "YOUTUBE", "CONSEIL"};
+
+/* ---- LE CONSEIL : la seule page qui n'affiche pas une donnee mais un
+   jugement. Une passe de cerveau -- periodique, ou demandee au bouton 1 --
+   croise ce que la carte sait deja (rendez-vous, meteo, sante du compagnon,
+   batterie) et n'ecrit que ce qui merite d'etre lu. Le reste du temps elle ne
+   coute rien : pas de TLS, pas de reveil de la dalle. ---- */
+static char conseil_txt[300] = "";          /* le conseil, en clair, ASCII */
+static char conseil_faits[64] = "";         /* les faits qui l'ont motive */
+static char conseil_quand[8] = "";          /* heure du calcul, "22H16" */
+static volatile bool conseil_vide = false;  /* derniere passe : rien a dire */
+static volatile bool conseil_occupe = false;
+static volatile bool conseil_demande = false;   /* passe forcee (bouton / HTTP) */
+static volatile int  conseil_passes = 0;        /* passes reussies, pour /state */
+static volatile int  conseil_etat = 0;          /* 1 ok, 2 pas de cle, 3 pas de wifi,
+                                                   4 session en cours, 5 cerveau muet */
+static void draw_app_conseil(void);
+static void conseil_tache(void *arg);
 
 /* defilement de la page HISTORIQUE : nombre de messages remontes dans le passe */
 static int hist_vue = 0;
@@ -355,6 +374,12 @@ static volatile bool heure_syncee = false; /* NTP deja passe (on le refait si le
    nomme) et non du calendrier ; vide = on annonce le rendez-vous */
 static char    annonce_txt[96] = "";
 static bool veille_nuit = false;          /* mise en veille la nuit (22h-7h) : OFF par defaut */
+/* ---- l'info defile toute seule : pas besoin d'appuyer sur les boutons ---- */
+static bool rotation_on = true;           /* pages d'info qui se succedent (NVS "rot") */
+static int  rotation_s  = 30;             /* secondes par page (NVS "rots") */
+static int64_t geste_ms = 0;              /* dernier geste de l'utilisateur (ms) */
+static int64_t rotation_ms = 0;           /* dernier changement automatique (ms) */
+#define ROTATION_PAUSE_MS 90000           /* apres un geste, on le laisse lire 90 s */
 static bool voix_sortie = false;          /* HAUT-PARLEUR MUET : le robot ecrit, il ne parle pas */
 static int  voix_dit_nb = 0;              /* phrases produites (muettes ou non) */
 static int64_t alarme_t0 = 0;            /* quand elle a commence */
@@ -1167,6 +1192,8 @@ static void app_titre(const char *nom)
     /* le rappel des boutons, en petit a droite (pas sur le visage : plein) */
     if (ui_page == PAGE_SYS)
         a_text(196 - 6 * 18, 10, 1, "BOUTON 2 = ACCUEIL");
+    else if (ui_page == PAGE_CONSEIL)
+        a_text(196 - a_text_w(1, "1 = REJUGER"), 10, 1, "1 = REJUGER");
 }
 
 static void app_bas(const char *txt)
@@ -1701,6 +1728,32 @@ static void draw_app_youtube(void)
         a_text(8, 150, 2, b);
     }
     if (yt_age[0]) a_text(192 - a_text_w(2, yt_age), 168, 2, yt_age);
+}
+
+/* ---------- 7. CONSEIL : ce que la carte juge utile de dire ---------- */
+static void draw_app_conseil(void)
+{
+    app_titre("CONSEIL");
+    if (!conseil_passes) {
+        a_text_c(100, 58, 3, "IL OBSERVE");
+        a_text_c(100, 94, 2, "PREMIERE PASSE");
+        a_text_c(100, 110, 2, "EN COURS");
+        if (conseil_faits[0]) a_text_c(100, 146, 2, conseil_faits);
+        return;
+    }
+    if (conseil_vide || !conseil_txt[0]) {
+        a_text_c(100, 50, 6, "RIEN");
+        a_text_c(100, 96, 2, "A SIGNALER");
+        if (conseil_faits[0]) a_text_c(100, 126, 2, conseil_faits);
+    } else {
+        texte_grand(34, 2, conseil_txt, 6);
+        if (conseil_faits[0]) a_text_c(100, 152, 2, conseil_faits);
+    }
+    if (conseil_quand[0]) {
+        char b[24];
+        snprintf(b, sizeof(b), "JUGE A %s", conseil_quand);
+        app_bas(b);
+    }
 }
 
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */
@@ -3025,6 +3078,7 @@ static void show_ui(void)
         case PAGE_SYS:     draw_app_sys();    break;
         case PAGE_HIST:    draw_app_hist();   break;
         case PAGE_YT:      draw_app_youtube(); break;
+        case PAGE_CONSEIL: draw_app_conseil(); break;
         case PAGE_REG:     draw_app_reglages(); break;
         default:           draw_app_sys();     break;
         }
@@ -3169,6 +3223,7 @@ static void ui_action(int i)
 static void touch_handle(int sx, int sy, int ex, int ey, int ms)
 {
     int dx = ex - sx, dy = ey - sy;
+    geste_ms = esp_timer_get_time() / 1000;
     ESP_LOGI(TAG, "tactile (%d,%d)->(%d,%d) %d ms", sx, sy, ex, ey, ms);
 
     if (ms < 900 && abs(dx) > 30 && abs(dx) > abs(dy)) {
@@ -3233,6 +3288,7 @@ static void touch_task(void *arg)
  */
 static void page_next(int d)
 {
+    geste_ms = esp_timer_get_time() / 1000;
     ui_page = (ui_page + d) % PAGE_COUNT;
     if (ui_page < 0) ui_page += PAGE_COUNT;
     ESP_LOGI(TAG, "bouton : page %d", ui_page);
@@ -3425,6 +3481,7 @@ static void reg_bouton_long(int n);
 
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
+    geste_ms = esp_timer_get_time() / 1000;   /* l'utilisateur reprend la main : la rotation attend */
     if (rep_bouton_court(n)) return;     /* la reponse en pages plein ecran */
     /* (l'historique ne prend plus le bouton 1 : sinon, arrive sur la derniere
        page, l'appui simple ne faisait que remonter le journal et le cycle
@@ -3438,6 +3495,12 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         return;
     }
     if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
+    /* CONSEIL : le bouton 1 ne tourne pas la page, il demande un nouveau
+       jugement (le seul geste de cette page). */
+    if (ui_page == PAGE_CONSEIL && n == 0) {
+        if (!conseil_occupe) { conseil_demande = true; ui_beep(); }
+        return;
+    }
     /* une tache tourne : l'appui simple l'arrete au lieu de tourner la page */
     if (wake_busy || radio_etat || voix_etat) {
         tache_arrete();
@@ -3469,6 +3532,7 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
 
 static void bouton_double(int n)
 {
+    geste_ms = esp_timer_get_time() / 1000;
     /* page REGLAGES : le clavier garde ses deux gestes (taper un mot de passe
        avec deux boutons reste sinon interminable) */
     if (ui_page == PAGE_REG && reg_vue == REG_CLAVIER && n == 0) {
@@ -3498,6 +3562,7 @@ static void bouton_double(int n)
 static void bouton_long(int n, int tres_long)
 {
     (void)tres_long;
+    geste_ms = esp_timer_get_time() / 1000;
     if (rep_bouton_long(n)) return;
     if (ui_page == PAGE_HIST) { hist_vue = 0; show_ui(); return; }   /* revenir au plus recent */
     if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
@@ -3701,7 +3766,11 @@ static esp_err_t h_bouton(httpd_req_t *req)
     char v[16] = "";
     if (qval(req, "p", v, sizeof(v)) == ESP_OK && v[0]) {
         int pg = atoi(v);
-        if (pg >= 0 && pg < PAGE_COUNT) { ui_page = pg; timer_mode = 0; show_ui(); }
+        if (pg >= 0 && pg < PAGE_COUNT) {
+            ui_page = pg; timer_mode = 0;
+            geste_ms = esp_timer_get_time() / 1000;   /* page imposee = geste : la rotation attend */
+            show_ui();
+        }
     }
     if (qval(req, "n", v, sizeof(v)) == ESP_OK && v[0]) {
         int n = atoi(v) ? 1 : 0;
@@ -3713,7 +3782,7 @@ static esp_err_t h_bouton(httpd_req_t *req)
     }
     vTaskDelay(pdMS_TO_TICKS(500));            /* laisse la tache bouton agir */
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddStringToObject(r, "page", PAGE_NOM[ui_page]);
+    cJSON_AddStringToObject(r, "page", ui_page < PAGE_COUNT ? PAGE_NOM[ui_page] : "?");
     cJSON_AddNumberToObject(r, "page_i", ui_page);
     return send_json(req, r);
 }
@@ -3775,6 +3844,26 @@ static void pet_charge(void)
     }
 }
 
+/* Change de page tout seul : ACCUEIL -> METEO -> RAPPELS -> SYSTEM ->
+   HISTORIQUE -> YOUTUBE. C'est ce qui permet de lire l'information sans
+   toucher aux boutons. On ne tourne jamais pendant que le robot travaille
+   (ecoute, reflexion, reponse en pages) ni juste apres un geste : l'utilisateur
+   doit garder la page qu'il vient de choisir. */
+static void rotation_tick(void)
+{
+    if (!rotation_on || rotation_s <= 0) return;
+    if (act_on || wake_busy || rep_ouvert || alarme_on) return;
+    if (ui_page == PAGE_REG) return;                 /* le clavier, pas une page d'info */
+    int64_t t = esp_timer_get_time() / 1000;
+    if (geste_ms && t - geste_ms < ROTATION_PAUSE_MS) return;
+    if (!rotation_ms) { rotation_ms = t; return; }   /* on demarre le compte ici */
+    if (t - rotation_ms < (int64_t)rotation_s * 1000) return;
+    rotation_ms = t;
+    ui_page = (ui_page + 1) % PAGE_COUNT;
+    ESP_LOGI(TAG, "rotation : page %s", PAGE_NOM[ui_page]);
+    show_ui();
+}
+
 static void pet_task(void *arg)
 {
     int save = 0, derniere_nuit = -1, vu_x = -1, vu_pas = -1, vu_humeur = -1, vu_endormi = -1;
@@ -3790,6 +3879,7 @@ static void pet_task(void *arg)
         }
         pet_tick(&pet, 1);
         xSemaphoreGive(pet_mux);
+        rotation_tick();                  /* les pages d'info defilent seules */
         /* les timers/alarmes de la page Timer */
         int64_t maintenant_us = esp_timer_get_time();
         for (int i = 0; i < TIMER_MAX; i++) {
@@ -7819,6 +7909,39 @@ static esp_err_t h_veille(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* /rotation?o=0|1&s=SEC : les pages d'info defilent seules, sans toucher aux
+   boutons (30 s par defaut). o=0 fige la page courante ; s regle la duree. */
+static esp_err_t h_rotation(httpd_req_t *req)
+{
+    char v[8] = "";
+    bool change = false;
+    if (qval(req, "o", v, sizeof(v)) == ESP_OK && v[0]) {
+        rotation_on = (v[0] != '0');
+        change = true;
+    }
+    if (qval(req, "s", v, sizeof(v)) == ESP_OK && v[0]) {
+        int s = atoi(v);
+        if (s >= 5 && s <= 600) { rotation_s = s; change = true; }
+    }
+    if (change) {
+        rotation_ms = 0;                  /* on repart de l'instant du reglage */
+        nvs_handle_t nh;
+        if (nvs_open("mino", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_set_i32(nh, "rot", rotation_on ? 1 : 0);
+            nvs_set_i32(nh, "rots", rotation_s);
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
+    }
+    char r[96];
+    snprintf(r, sizeof(r), "{\"rotation\":%s,\"s\":%d,\"page\":\"%.10s\"}",
+             rotation_on ? "true" : "false", rotation_s,
+             ui_page < PAGE_COUNT ? PAGE_NOM[ui_page] : "?");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, r);
+    return ESP_OK;
+}
+
 /* /voix?o=0|1 : sortie haut-parleur. 0 (defaut) = le robot ecrit seulement. */
 static esp_err_t h_voix_off(httpd_req_t *req)
 {
@@ -9694,6 +9817,188 @@ static esp_err_t h_pet(httpd_req_t *req)
 
 static esp_err_t h_reglages(httpd_req_t *req);   /* defini plus bas */
 
+/* ================================================================== */
+/* LE CONSEIL : une passe de cerveau qui ne repond PAS a une question. */
+/* Elle juge la situation avec ce que la carte sait deja, et n'ecrit   */
+/* que ce qui merite d'etre lu. Aucun rappel ne peut en sortir.        */
+/* ================================================================== */
+#define CONSEIL_PERIODE_S 1800     /* une passe toutes les 30 minutes */
+#define CONSEIL_MIN_S      420     /* jamais deux passes rapprochees */
+
+static int conseil_batterie(void)
+{
+    int mv = (sys_bat_mv_cache >= 0) ? sys_bat_mv_cache : sys_bat_mv();
+    return (mv > 0) ? sys_bat_pct(mv) : -1;
+}
+
+static void conseil_faits_maj(void)
+{
+    char b[64];
+    size_t o = 0;
+    b[0] = 0;
+    if (ms_dans >= 0 && ms_titre[0]) {
+        if (ms_dans < 60)
+            o += (size_t)snprintf(b + o, sizeof(b) - o, "RDV %dMIN", ms_dans);
+        else if (ms_dans < 1440)
+            o += (size_t)snprintf(b + o, sizeof(b) - o, "RDV %dH%02d", ms_dans / 60, ms_dans % 60);
+        else
+            o += (size_t)snprintf(b + o, sizeof(b) - o, "RDV %dJ", ms_dans / 1440);
+    }
+    int bat = conseil_batterie();
+    if (bat >= 0 && o + 14 < sizeof(b))
+        o += (size_t)snprintf(b + o, sizeof(b) - o, "%sBAT %d%%", o ? "  " : "", bat);
+    if (!o) snprintf(b, sizeof(b), "PAS DE DONNEES");
+    snprintf(conseil_faits, sizeof(conseil_faits), "%s", b);
+}
+
+/* la reponse du modele arrive en UTF-8 avec des accents et des guillemets :
+   la dalle ne connait que l'ASCII et les majuscules de la police 3x5. */
+static void conseil_nettoie(char *s)
+{
+    char *d = s;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\n' || *p == '\r' || *p == '"' || *p == '*' || *p == '#') continue;
+        if (*p == ' ' && d > s && d[-1] == ' ') continue;
+        *d++ = *p;
+    }
+    while (d > s && d[-1] == ' ') d--;
+    *d = 0;
+    for (char *p = s; *p; p++)
+        if (*p >= 'a' && *p <= 'z') *p = (char)(*p - 32);
+}
+
+static void conseil_une_passe(void)
+{
+    if (conseil_occupe) return;
+    if (!ia_key()[0]) { conseil_etat = 2; return; }
+    if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) { conseil_etat = 3; return; }
+    /* on ne vole ni le reseau ni la RAM d'une session en cours */
+    if (act_on || wake_busy || radio_etat || voix_etat) { conseil_etat = 4; return; }
+
+    conseil_occupe = true;
+    char *q   = (char *)heap_caps_malloc(760, MALLOC_CAP_SPIRAM);
+    char *dit = (char *)heap_caps_malloc(420, MALLOC_CAP_SPIRAM);
+    char *emo = (char *)heap_caps_malloc(24,  MALLOC_CAP_SPIRAM);
+    esp_err_t e = ESP_FAIL;
+    if (q && dit && emo) {
+        char jour[96];
+        date_fr(jour, sizeof(jour));
+        size_t o = 0;
+        o += (size_t)snprintf(q + o, 760 - o,
+                              "PASSE INTERNE : personne ne te parle, c'est ma surveillance. "
+                              "Date : %s. ", jour);
+        if (ms_dans >= 0 && ms_titre[0] && o < 600) {
+            /* le delai est donne en clair : un "1511 minutes" se faisait
+               traduire en "onze minutes" par le modele, et le conseil etait faux */
+            char delai[48];
+            if (ms_dans < 60)
+                snprintf(delai, sizeof(delai), "%d MINUTES", ms_dans);
+            else if (ms_dans < 1440)
+                snprintf(delai, sizeof(delai), "%d HEURES %02d", ms_dans / 60, ms_dans % 60);
+            else
+                snprintf(delai, sizeof(delai), "%d JOUR%s ET %d HEURES",
+                         ms_dans / 1440, (ms_dans / 1440) > 1 ? "S" : "",
+                         (ms_dans % 1440) / 60);
+            o += (size_t)snprintf(q + o, 760 - o, "Rendez-vous '%s' a %s, c'est-a-dire DANS %s. ",
+                                  ms_titre, ms_heure, delai);
+        }
+        if (meteo_ok && o < 660)
+            o += (size_t)snprintf(q + o, 760 - o, "Dehors %.0f degres, %s. ",
+                                  (double)meteo_temp, meteo_texte(meteo_code));
+        if (o < 660)
+            o += (size_t)snprintf(q + o, 760 - o,
+                                  "Mon compagnon : sante %d%%, faim %d%%, energie %d%%. ",
+                                  pet_sante(&pet), (int)(pet.faim / 100),
+                                  (int)(pet.energie / 100));
+        {
+            int bat = conseil_batterie();
+            if (bat >= 0 && o < 660)
+                o += (size_t)snprintf(q + o, 760 - o, "Batterie %d%%. ", bat);
+        }
+        if (o < 660)
+            snprintf(q + o, 760 - o,
+                     "Question : qu'est-ce que je dois retenir ou faire maintenant ? "
+                     "Une seule phrase, 15 mots maximum, un ordre concret (partir, brancher, "
+                     "soigner, dormir...). Reprends le delai tel qu'il est ecrit : ne le "
+                     "recalcule pas, n'invente aucun chiffre. S'il n'y a rien avant plusieurs "
+                     "heures et que tout va bien, mets RIEN. "
+                     "REPONDS UNIQUEMENT L'OBJET JSON DE TES REGLES, avec ta phrase dans "
+                     "\"dit\" ; n'utilise ni cherche, ni souvien, ni rappel.");
+        rappel_ce_tour = true;      /* une passe interne ne cree jamais de rappel */
+        e = ds_chat(q, dit, 420, emo, 24);
+        rappel_ce_tour = false;
+    }
+    if (e == ESP_OK && dit) {
+        char ascii[300];
+        texte_ascii(dit, ascii, sizeof(ascii));
+        conseil_nettoie(ascii);
+        bool rien = (ascii[0] == 0) || (strstr(ascii, "RIEN") && strlen(ascii) <= 18);
+        if (rien) {
+            conseil_txt[0] = 0;
+            conseil_vide = true;
+        } else {
+            snprintf(conseil_txt, sizeof(conseil_txt), "%s", ascii);
+            conseil_vide = false;
+        }
+        time_t t = time(NULL);
+        struct tm tm;
+        localtime_r(&t, &tm);
+        snprintf(conseil_quand, sizeof(conseil_quand), "%02dH%02d", tm.tm_hour, tm.tm_min);
+        conseil_faits_maj();
+        conseil_passes++;
+        conseil_etat = 1;
+        ESP_LOGI(TAG, "conseil %d : %s", (int)conseil_passes,
+                 conseil_vide ? "(rien a signaler)" : conseil_txt);
+        if (ui_page == PAGE_CONSEIL && !act_on) redraw_demande = true;
+    } else {
+        conseil_etat = 5;
+        ESP_LOGW(TAG, "conseil : passe sans reponse (%s)", esp_err_to_name(e));
+    }
+    if (q) free(q);
+    if (dit) free(dit);
+    if (emo) free(emo);
+    conseil_occupe = false;
+}
+
+static void conseil_tache(void *arg)
+{
+    (void)arg;
+    /* elle attend le reseau sans retarder le demarrage de la carte */
+    xEventGroupWaitBits(wifi_eg, WIFI_OK_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+    vTaskDelay(pdMS_TO_TICKS(12000));    /* meteo, agenda et heure d'abord */
+    int64_t dernier = 0;
+    for (;;) {
+        int64_t now = esp_timer_get_time() / 1000000;
+        bool forcee   = conseil_demande;
+        bool echeance = (dernier == 0) || (now - dernier >= CONSEIL_PERIODE_S);
+        /* un rendez-vous proche change la donne : on rejuge sans attendre */
+        bool urgence  = (dernier > 0) && (now - dernier >= CONSEIL_MIN_S) &&
+                        (ms_dans >= 0 && ms_dans <= 120);
+        if ((forcee || echeance || urgence) && !conseil_occupe) {
+            conseil_demande = false;
+            conseil_une_passe();
+            dernier = esp_timer_get_time() / 1000000;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+static esp_err_t h_conseil(httpd_req_t *req)
+{
+    char q[64];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK && strstr(q, "o=1"))
+        conseil_demande = true;
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "conseil", conseil_txt);
+    cJSON_AddStringToObject(r, "faits", conseil_faits);
+    cJSON_AddStringToObject(r, "quand", conseil_quand);
+    cJSON_AddBoolToObject(r, "vide", conseil_vide);
+    cJSON_AddNumberToObject(r, "passes", (double)conseil_passes);
+    cJSON_AddBoolToObject(r, "occupe", conseil_occupe);
+    cJSON_AddNumberToObject(r, "etat", (double)conseil_etat);
+    return send_json(req, r);
+}
+
 static esp_err_t h_status(httpd_req_t *req)
 {
     /* un navigateur demande du HTML : on lui donne la page de reglages, pour
@@ -9728,6 +10033,8 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "hist_sd_base", (double)hist_sd_base);
     cJSON_AddNumberToObject(r, "hist_sd_ko", (double)hist_sd_erreurs);
     cJSON_AddBoolToObject(r, "veille_nuit", veille_nuit);
+    cJSON_AddBoolToObject(r, "rotation", rotation_on);
+    cJSON_AddNumberToObject(r, "rotation_s", (double)rotation_s);
     cJSON_AddStringToObject(r, "hist_sd_etat", hist_sd_pourquoi);
     cJSON_AddBoolToObject(r, "voix_sortie", voix_sortie);
     cJSON_AddNumberToObject(r, "voix_dit_nb", (double)voix_dit_nb);
@@ -9813,6 +10120,10 @@ static esp_err_t h_status(httpd_req_t *req)
         cJSON_AddStringToObject(r, "heure", hb);
     }
     cJSON_AddNumberToObject(r, "meteo_c", meteo_ok ? (double)meteo_temp : -999.0);
+    cJSON_AddStringToObject(r, "conseil", conseil_txt);
+    cJSON_AddStringToObject(r, "conseil_quand", conseil_quand);
+    cJSON_AddStringToObject(r, "conseil_faits", conseil_faits);
+    cJSON_AddNumberToObject(r, "conseil_passes", (double)conseil_passes);
     return send_json(req, r);
 }
 
@@ -9995,8 +10306,8 @@ static esp_err_t h_reglages(httpd_req_t *req)
 static void api_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 40;   /* 28 ne suffisait plus : les derniers URI
-                                    (/bande, /ecran) n'etaient pas enregistres */
+    cfg.max_uri_handlers = 48;   /* 40 ne suffisait plus : /conseil et /ical en
+                                    trop, "no slots left" (2 URI perdues) */
     cfg.stack_size = 12288;   /* h_say fait du TLS : 8 Ko ne suffisaient pas */
     cfg.max_open_sockets = 2; /* 7 sockets par defaut = 7 piles de 16 Ko (112 Ko
                                  de RAM interne) ; on n'a jamais plus de 2 clients */
@@ -10035,6 +10346,7 @@ static void api_start(void)
     httpd_register_uri_handler(srv, &u);
     u.handler = h_maj;   u.uri = "/maj";      u.method = HTTP_POST;
     httpd_register_uri_handler(srv, &u); u.method = HTTP_GET;
+    u.handler = h_conseil; u.uri = "/conseil"; httpd_register_uri_handler(srv, &u);
     u.handler = h_ical;  u.uri = "/ical";     httpd_register_uri_handler(srv, &u);
     u.handler = h_wifi;   u.uri = "/wifi";    httpd_register_uri_handler(srv, &u);
     u.handler = h_reglages; u.uri = "/reglages"; httpd_register_uri_handler(srv, &u);
@@ -10047,6 +10359,7 @@ static void api_start(void)
     u.handler = h_dit;   u.uri = "/dit";   httpd_register_uri_handler(srv, &u);
     u.handler = h_hist;  u.uri = "/hist";  httpd_register_uri_handler(srv, &u);
     u.handler = h_veille; u.uri = "/veille"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_rotation; u.uri = "/rotation"; httpd_register_uri_handler(srv, &u);
     u.handler = h_voix_off; u.uri = "/voix"; httpd_register_uri_handler(srv, &u);
     u.handler = h_ecran; u.uri = "/ecran"; httpd_register_uri_handler(srv, &u);
     u.handler = h_fichier; u.uri = "/fichier"; httpd_register_uri_handler(srv, &u);
@@ -10107,6 +10420,8 @@ extern "C" void app_main(void)
         if (nvs_open("mino", NVS_READONLY, &nh) == ESP_OK) {
             if (nvs_get_i32(nh, "toff10", &v) == ESP_OK) ui_temp_offset = (float)v / 10.0f;
             if (nvs_get_i32(nh, "veille", &v) == ESP_OK) veille_nuit = (v != 0);
+            if (nvs_get_i32(nh, "rot", &v) == ESP_OK) rotation_on = (v != 0);
+            if (nvs_get_i32(nh, "rots", &v) == ESP_OK && v >= 5 && v <= 600) rotation_s = (int)v;
             if (nvs_get_i32(nh, "voixsortie", &v) == ESP_OK) voix_sortie = (v != 0);
             nvs_close(nh);
         }
@@ -10241,6 +10556,11 @@ extern "C" void app_main(void)
     xTaskCreate(ui_task, "ui", 4096, NULL, 3, NULL);   /* plus de TLS ici : il est dans net_task */
     net_q = xQueueCreate(4, sizeof(int));
     xTaskCreate(net_task, "reseau", 8192, NULL, 2, NULL);   /* meteo, infos, youtube : les TLS */
+    /* le conseil : une passe de cerveau qui juge au lieu de repondre.
+       Pile en PSRAM : ds_chat a besoin de 16 Ko comme l'assistant. */
+    if (xTaskCreateWithCaps(conseil_tache, "conseil", 16384, NULL, 2, NULL,
+                            MALLOC_CAP_SPIRAM) != pdPASS)
+        ESP_LOGE(TAG, "conseil : pas de pile PSRAM");
     /* tampon de la meteo : 2 Ko pour toute la vie de la carte (service reseau) */
     meteo_buf = (char *)heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
     if (!meteo_buf) meteo_buf = (char *)malloc(2048);

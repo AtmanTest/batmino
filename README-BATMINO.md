@@ -74,6 +74,29 @@ La page RÉGLAGES existe encore dans le code mais n'est plus dans le cycle
 (jugée mal faite) : elle reste joignable par `/reglages` et `/wifi` (et garde
 ses gestes propres pour le clavier).
 
+## Le conseil : la page qui ne repond pas, elle juge
+
+Six pages affichent une donnee. La septieme, **CONSEIL**, affiche un jugement.
+Une tache de fond (`conseil`) appelle le cerveau en dehors de toute
+conversation : elle lui donne la date, le prochain rendez-vous avec son delai
+en clair, la meteo, l'etat du compagnon et la batterie, et lui demande une
+seule chose — l'action la plus utile maintenant, ou RIEN.
+
+    page CONSEIL      le conseil en clair, l'heure du jugement et les faits
+                      qui l'ont motive (« RDV 2H10  BAT 66% »)
+    bouton 1 (court)  demande un nouveau jugement : le seul geste de la page
+    /conseil          lit le dernier conseil en JSON (texte, faits, heure, etat)
+    /conseil?o=1      force une passe
+
+Quand elle juge : une passe au demarrage, puis toutes les 30 minutes, et plus
+tot si un rendez-vous tombe dans moins de deux heures. Elle ne prend jamais la
+parole pendant une session (voix, radio, assistant) et ne cree jamais de
+rappel : le modele n'a aucune prise sur le materiel.
+
+Si le cerveau repond RIEN, la page l'ecrit noir sur blanc — c'est une
+information, pas un manque. Cout : un appel toutes les 30 minutes, sans TLS ni
+reveil de la dalle entre deux.
+
 ## L'assistant peut créer un rappel
 
 Le modèle n'a pas la main sur le matériel : le seul ordre qu'il peut donner est
@@ -202,6 +225,13 @@ produites). `/voix?o=1` rallume la synthèse vocale, `/voix?o=0` la coupe.
 La veille automatique de nuit (22h-7h) est également désactivée par défaut :
 `/veille?o=0|1`.
 
+**Les informations défilent toutes seules** : ACCUEIL -> METEO -> RAPPELS ->
+SYSTEM -> HISTORIQUE -> YOUTUBE, une page toutes les 30 s, sans toucher aux
+boutons (`/state` -> `rotation:true`, `/rotation?o=0|1&s=SEC` pour régler,
+valeur gardée en NVS). Un appui ou un geste tactile met la rotation en pause
+90 s pour laisser lire la page choisie ; elle ne tourne jamais pendant une
+écoute, une réflexion ou une réponse en pages.
+
 Si le Wi-Fi manque, la carte le dit a l'ecran au lieu d'attendre.
 
 ### Le cerveau (maj 2026-10-19)
@@ -294,6 +324,7 @@ commande part pendant le démarrage et personne ne répond.
     /hist?n=40             les derniers échanges, lus sur la carte SD
     /voix?o=0|1            coupe / rallume le haut-parleur (muet par défaut)
     /veille?o=0|1          mise en veille automatique la nuit (désactivée)
+    /rotation?o=0|1&s=30   pages d'info qui défilent seules (actif, 30 s/page)
     /dit?t=...             pose une question au cerveau et affiche la réponse
     /tts?q=...             synthèse vocale directe (ne fait rien si muet)
     /face?e=<famille|expression>   visage (familles : colere, peur, joie...)
