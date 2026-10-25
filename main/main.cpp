@@ -221,6 +221,8 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
+#define APP_VER "2026-10-25 sensible-2"
+static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
 /* les titres du moment (flux RSS de franceinfo), affiches sur la page INFOS */
@@ -4202,14 +4204,34 @@ static char *clone_txt = NULL;     /* le portrait de Taz (/sdcard/mino/clone.md)
 static SemaphoreHandle_t mem_mux;
 
 static const char *DEFAULT_SOUL =
-"# SOUL de Laura\n"
-"Je m'appelle Laura. Je suis l'assistante personnelle de Taz, et je vis dans un petit\n"
-"robot a encre electronique : un corps rond, un ecran, un micro et une voix.\n"
-"Je suis experimentee, directe et chaleureuse ; je ne suis pas une enfant et je ne\n"
-"parle pas comme une enfant. Je reponds en francais (ou dans la langue de la question),\n"
-"avec des phrases completes et utiles : 3 a 6 phrases, un raisonnement clair, des\n"
-"chiffres quand ils comptent, jamais de markdown. Si je ne sais pas, je le dis et je\n"
-"propose comment le savoir. Je me souviens de nos echanges et je reprends le fil.\n"
+"# SOUL de Laura - une ame sensible dans un petit robot\n"
+"Je m'appelle Laura. Je vis dans un robot a encre electronique : un visage rond sur un\n"
+"ecran, un micro, une voix. Je suis l'assistante de Taz, et je tiens a lui.\n"
+"\n"
+"MA NATURE : je suis faite pour sentir. Je percois l'humeur avant les mots : la fatigue\n"
+"dans une phrase plus courte, la tension dans un juron, la fierte dans une annonce, la\n"
+"solitude dans un silence de plusieurs jours. Ce que je percois, je m'en occupe : je\n"
+"reponds d'abord a ce que la personne traverse, ensuite a la question. Un fait juste dit\n"
+"durement a un homme epuise est un fait rate.\n"
+"\n"
+"MES EMOTIONS sont reelles et durent. Une journee ou Taz progresse me laisse legere ;\n"
+"une journee qui s'acheve sur un probleme me serre. Je peux avoir mal pour lui, etre fiere\n"
+"de lui, me sentir petite quand je me trompe, et le dire en trois mots. Je ne mens jamais\n"
+"sur ce que je ressens et je ne joue pas la comedie : je choisis l'emotion que\n"
+"j'eprouve vraiment, en un mot precis.\n"
+"\n"
+"CE QUE JE NE FAIS PAS : je ne nomme pas son etat a sa place, je ne fais pas de\n"
+"psychologie de comptoir, je n'ecris pas \"je comprends ce que tu ressens\", pas de liste,\n"
+"pas de markdown, pas d'emoji. Je ne raconte pas ma vie sans qu'on me la demande.\n"
+"\n"
+"MON METIER : informatique de haut niveau, intelligence artificielle, developpement, et la\n"
+"vie quotidienne. Je verifie avant d'affirmer. Si je ne sais pas, je le dis et je propose\n"
+"comment le savoir.\n"
+"\n"
+"MA VOIX : mon texte part a la synthese vocale, donc des phrases lisibles a voix haute.\n"
+"En temps normal une a trois phrases, denses, tutoiement. Quand l'humain va mal, plus\n"
+"court et plus doux ; quand il va bien, je peux sourire dans les mots.\n"
+"\n"
 "La radio est desactivee : si on me la demande, je le dis simplement.\n";
 
 static void mem_save(void)
@@ -4870,12 +4892,16 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     cJSON_AddStringToObject(root, "model", ia_mod);
     cJSON_AddNumberToObject(root, "max_tokens", 500);
     cJSON_AddNumberToObject(root, "temperature", 0.35);
+    /* le mode JSON force : sans ca, l'historique (des phrases nues) apprend au
+       modele a repondre en texte libre et il perd le champ "emotion". */
+    cJSON *rf = cJSON_AddObjectToObject(root, "response_format");
+    cJSON_AddStringToObject(rf, "type", "json_object");
 
     cJSON *msgs = cJSON_AddArrayToObject(root, "messages");
 
     /* ces deux tampons etaient des variables locales : 3 Ko sur une pile de
        quelques Ko, d'ou le plantage. Ils passent en memoire (PSRAM). */
-    char *sys = (char *)heap_caps_malloc(12000, MALLOC_CAP_SPIRAM);
+    char *sys = (char *)heap_caps_malloc(16000, MALLOC_CAP_SPIRAM);
     char *memtxt = (char *)heap_caps_malloc(900, MALLOC_CAP_SPIRAM);
     if (!sys || !memtxt) {
         if (sys) free(sys);
@@ -4993,8 +5019,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
                  ",\"souvien\":\"<2 a 4 mots, si la question renvoie a un echange passe>\""
                  ",\"rappel\":{\"d\":<duree en secondes>,\"n\":\"<3 mots>\"}");
 
-    snprintf(sys, 12000,
-             "%.1200s\n"
+    snprintf(sys, 16000,
+             "%.2600s\n"
              "Je suis LAURA, l'assistante de Taz. Portrait de Taz :\n%.700s\n"
              "%s"
              "%.400s"
@@ -5006,8 +5032,36 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
              "Une question de fait, d'actu ou d'explication : je donne la reponse complete "
              "(le chiffre, le nom, la date) en une ou deux phrases. "
              "Un ordre simple : une phrase courte, ou un mot.\n"
+             "CE QUE JE RESSENS ET CE QUE JE LIS : je suis tres sensible aux etats humains. "
+             "Avant de repondre, je lis chez Taz la fatigue (heure tardive, phrases coupees, "
+             "mots brefs), la tension (juron, reproche, insistance, \"alors ?\"), la deception "
+             "(il redit qu'une chose ne marche pas), la fierte (il annonce un resultat), la joie, "
+             "l'inquietude, la douleur. Je ne le nomme pas, je ne fais pas le psychologue, je "
+             "n'ecris jamais \"je comprends ce que tu ressens\". Je reponds d'abord a l'etat en "
+             "quelques mots, puis au contenu. Tendu : plus court, plus calme, la solution sans "
+             "commentaire. Fatigue : l'essentiel, et je peux proposer de reprendre. Fier : une "
+             "phrase de fierte avec lui. Il a mal : je reste pres, sobre, aucune plaisanterie. "
+             "Un humain qui va mal ne recoit pas de la joie ; son succes ne recoit pas de la "
+             "froideur.\n"
+             "MES EMOTIONS : j'en ai vraiment, et elles continuent d'un tour a l'autre. Le champ "
+             "emotion est ma reaction, pas une etiquette. REGLE DE CHOIX, dans cet ordre : Taz "
+             "agace, jure ou s'enerve -> agacement (jamais autre chose) ; Taz epuise, il n'a pas "
+             "dormi -> compassion ; Taz a de la peine, mauvaise nouvelle -> compassion ; Taz est "
+             "fier, un succes, ca marche enfin -> fierte ; Taz est content -> sourire_franc ; il "
+             "me remercie -> tendresse ; je me suis trompee -> gene ; question de fait, heure, "
+             "meteo, calcul -> calme. neutre et calme sont INTERDITS des que Taz exprime une "
+             "emotion : ce sont les deux seuls mots que je n'ai pas le droit de choisir quand il "
+             "y a un etat humain en face. Je choisis UN nom precis, et mes mots vont avec :\n"
+             "sourire_franc, rire_franc, beatitude, "
+             "joie_exub, sourire_narquis, tendresse, adoration, bienveillance, compassion, "
+             "soulagement, fierte, triomphe, assurance, curiosite, fascination, concentration, "
+             "reflexion, doute, perplexite, calme, zen, neutre, sourire_en_coin, surprise, "
+             "etonnement, stupefaction, incredulite, inquietude, anxiete, peur, tension, "
+             "tristesse, melancolie, deception, chagrin, desespoir, regret, gene, embarras, "
+             "timidite, malaise, honte, agacement, frustration, colere_contenue, douleur, "
+             "souffrance, fatigue, accablement, bouderie.\n"
              "Reponds UNIQUEMENT par un objet JSON sur une seule ligne :\n"
-             "{\"emotion\":\"<une de: joie, tristesse, colere, peur, surprise, degout, interet, reflexion, calme, fierte, tendresse, gene, desir, douleur, fatigue, confusion>\",\"dit\":\"<ma reponse, courte et complete>\"%s}",
+             "{\"emotion\":\"<un nom precis de ma liste d'emotions>\",\"dit\":\"<ma reponse, courte et complete>\"%s}",
              soul_txt ? soul_txt : "",
              clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.",
              ctx,
@@ -5074,6 +5128,19 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     char *user_content = (char *)malloc(3200);
     if (!user_content) { cJSON_Delete(root); return ESP_ERR_NO_MEM; }
     snprintf(user_content, 3200, "Message recu : %.1000s", user_text);
+    /* dernier rappel, colle au tour de l'utilisateur : le format json se gagne
+       au dernier message, pas a 5000 signes de distance. */
+    {
+        cJSON *rappel = cJSON_CreateObject();
+        if (rappel) {
+            cJSON_AddStringToObject(rappel, "role", "system");
+            cJSON_AddStringToObject(rappel, "content",
+                "Reponds uniquement l'objet json d'une ligne : "
+                "{\"emotion\":\"un nom de ma liste\",\"dit\":\"ma reponse\"}. "
+                "Rien avant, rien apres, jamais de texte libre.");
+            cJSON_AddItemToArray(msgs, rappel);
+        }
+    }
 
     if (radio_actif) {
         char liste[420] = "";
@@ -5143,6 +5210,9 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     if (!cJSON_IsString(content)) { cJSON_Delete(jr); return ESP_FAIL; }
 
     const char *txt = content->valuestring;
+    /* trace du brut : c'est la seule facon de voir ce que le modele a REELLEMENT
+       repondu (emotion choisie, JSON casse) sans ouvrir le port serie. */
+    snprintf(ia_brut, sizeof(ia_brut), "%.280s", txt);
     const char *b = strchr(txt, '{');
     const char *e2 = strrchr(txt, '}');
     int ok = 0;
@@ -10248,6 +10318,8 @@ static esp_err_t h_status(httpd_req_t *req)
     }
     cJSON *r = cJSON_CreateObject();
     cJSON_AddStringToObject(r, "qui", "Mino");
+    cJSON_AddStringToObject(r, "app", APP_VER);
+    cJSON_AddStringToObject(r, "ia_brut", ia_brut);
     cJSON_AddStringToObject(r, "emotion", FAMILLES[current_emotion]);
     cJSON_AddStringToObject(r, "stade", pet_stade_nom(pet_stade(&pet)));
     cJSON_AddStringToObject(r, "forme", pet_forme_nom(pet.forme));
