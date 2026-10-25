@@ -6,6 +6,7 @@
 #include "../main/art.h"
 #include "../main/petart.h"
 #include "../main/pet.h"
+#include "../main/livre.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -257,6 +258,27 @@ int main(int argc, char **argv)
             for (i = 0; i < EXPR_N; i++) if (EXPR[i].famille == f) printf(" %s", EXPR[i].nom);
             printf("\n");
         }
+        return 0;
+    }
+
+    /* lecteur de livres : ./preview livre fichier.txt [page] [sortie.png] */
+    if (argc >= 3 && !strcmp(argv[1], "livre")) {
+        const char *in = argv[2];
+        int page = argc >= 4 ? atoi(argv[3]) : 0;
+        const char *out = argc >= 5 ? argv[4] : "livre.png";
+        livre_t l;
+        if (!livre_charge(&l, in, LIVRE_COLS, LIVRE_ROWS)) {
+            fprintf(stderr, "lecture impossible : %s\n", in);
+            return 1;
+        }
+        livre_va(&l, page);
+        art_begin(fb, 0);
+        art_clear();
+        livre_dessine(&l);
+        printf("%s : %d lignes, %d pages, page %d (%d%%)\n",
+               in, l.nlignes, livre_pages(&l), l.page + 1, livre_pct(&l));
+        livre_ferme(&l);
+        write_png(out, fb, 200, 200, 3);
         return 0;
     }
 

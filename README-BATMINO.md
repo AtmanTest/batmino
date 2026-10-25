@@ -27,11 +27,15 @@ en noir et blanc, et qui parle.
     main/art.h/.cpp      le personnage 1 bit (73 expressions, 14 familles) + primitives
     main/pet.h/.cpp      le moteur du tamagotchi : jauges, évolution, maladie, mort
     main/petart.h/.cpp   le monde (ville, bat-signal, sol), le sprite qui évolue, le bandeau
+    main/livre.h/.cpp    le lecteur de livres : encodage, pagination, rendu 5x10
+    main/font5.h/.cpp    la police 5x10 du lecteur (accents compris), générée
     tools/preview.cpp    aperçu PNG sur le PC : le même code de dessin que la carte
     tools/pettest.cpp    vérifie le moteur en accéléré (jours simulés en secondes)
     tools/talk.py        dialogue série avec la carte
     tools/ecran.py       photo de l'écran réel -> PNG (attend que la carte soit prête)
     tools/ascii_fb.py    le framebuffer de la carte en ASCII, pour trancher un doute
+    tools/gen_font5.py   fabrique la police 5x10 du lecteur (tools/glcdfont.c = base)
+    tools/epub2txt.py    EPUB -> texte simple, à poser dans /livres sur la carte
 
 Le rendu est **partagé** : `art.cpp`/`petart.cpp` se compilent côté carte et côté
 PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
@@ -44,6 +48,9 @@ PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
     APPUI COURT bouton 1  : page SUIVANTE (1 = suite dans la page REPONSE)
     APPUI COURT bouton 2  : page PRÉCÉDENTE (2 = avant dans la page REPONSE)
     APPUI LONG (1 ou 2)   : retour à l'accueil et arrêt de ce qui tourne
+
+    Sur la page LIVRE, les deux boutons tournent les pages du livre et le
+    double appui 2 passe au livre suivant (voir docs/features/09-livre.md).
 
     Pendant une tâche (écoute, radio, voix), un appui simple — l'un ou l'autre
     bouton — l'arrête et ramène à l'accueil au lieu de tourner la page.
@@ -66,6 +73,8 @@ Pages du cycle, une appli par page (comme les premières versions) :
     HISTORIQUE les derniers échanges lus sur la carte
     YOUTUBE    la chaîne et sa dernière vidéo (vues, âge). Se règle une fois :
                `yt @monpseudo` dans la console, ou `yt UCxxxx...`
+    LIVRE      le lecteur : un .txt par livre dans /livres sur la carte, la
+               page courante en grand, position retenue entre deux sessions
 
 La page RÉGLAGES existe encore dans le code mais n'est plus dans le cycle
 (jugée mal faite) : elle reste joignable par `/reglages` et `/wifi` (et garde

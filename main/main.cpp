@@ -60,6 +60,7 @@
 #include "i2c_bsp.h"
 #include "audio_bsp.h"
 #include "epaper_driver_bsp.h"
+#include "livre.h"
 
 static const char *TAG = "mino";
 
@@ -313,11 +314,13 @@ static void draw_status_bar(void);
 #define PAGE_YT     4                     /* YOUTUBE  : la chaine, derniere video */
 #define PAGE_CONSEIL 5                    /* CONSEIL  : ce que la carte juge utile de
                                              dire maintenant (une passe de cerveau) */
-#define PAGE_REG    6                     /* REGLAGES : hors cycle (jugee mal faite),
+#define PAGE_LIVRE  6                     /* LIVRE    : le lecteur de livres (e-reader) */
+#define PAGE_REG    7                     /* REGLAGES : hors cycle (jugee mal faite),
                                              joignable par /reglages et le web */
-#define PAGE_COUNT  6
+#define PAGE_COUNT  7
 static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "SYSTEM",
-                                           "HISTORIQUE", "YOUTUBE", "CONSEIL"};
+                                           "HISTORIQUE", "YOUTUBE", "CONSEIL",
+                                           "LIVRE"};
 
 /* ---- LE CONSEIL : la seule page qui n'affiche pas une donnee mais un
    jugement. Une passe de cerveau -- periodique, ou demandee au bouton 1 --
@@ -339,6 +342,9 @@ static void conseil_tache(void *arg);
 /* defilement de la page HISTORIQUE : nombre de messages remontes dans le passe */
 static int hist_vue = 0;
 static void draw_app_hist(void);
+static void draw_app_livre(void);
+static bool livre_reprise(void);
+static void livre_arret(void);
 
 /* ui_page / ui_face / menu_* : declares plus haut (pres de show_face) */
 static float ui_temp = 0.0f, ui_humi = 0.0f;
@@ -1575,6 +1581,9 @@ static void appli_entre(int p)
     case PAGE_HIST:
         hist_vue = 0;
         break;
+    case PAGE_LIVRE:
+        livre_reprise();                 /* le livre reprend ou il en etait */
+        break;
     case PAGE_YT:
         if (!yt_buf) {
             yt_buf = (char *)heap_caps_malloc(YT_TAILLE, MALLOC_CAP_SPIRAM);
@@ -1606,6 +1615,9 @@ static void appli_sort(int p)
            lecture si la page a ete quittee entre-temps. */
         if (yt_en_cours) yt_a_liberer = true;
         else if (yt_buf) { free(yt_buf); yt_buf = NULL; yt_buf_taille = 0; }
+        break;
+    case PAGE_LIVRE:
+        livre_arret();                   /* la PSRAM du livre est rendue */
         break;
     default:
         break;
@@ -2947,6 +2959,150 @@ static void draw_app_sys(void)
 static int last_drawn_page = -1;      /* pour forcer un refresh complet au changement de page */
 static int partiels = 99;             /* partiels enchaines depuis le dernier refresh complet */
 
+/* ================================================================== */
+/* LE LIVRE -- le robot lit                                           */
+/*                                                                    */
+/* Un fichier .txt par livre dans /sdcard/livres. Le texte entier est  */
+/* garde en PSRAM (1 octet par caractere affiche) : tourner une page   */
+/* ne relit pas la carte, ca ne coute qu'un rafraichissement partiel.  */
+/* Gestes : 1 = page suivante, 2 = page precedente, double 2 = livre    */
+/* suivant, appui long = retour a l'accueil (geste commun a tout).     */
+/* ================================================================== */
+#define LIVRE_DOSSIER "/sdcard/livres"
+#define LIVRE_MAXI    12
+static livre_t livre;
+static bool  livre_pret = false;
+static char  livre_noms[LIVRE_MAXI][LIVRE_TITRE_MAX];
+static int   livre_n = 0;
+static bool  livre_scan_fait = false;
+static char  livre_dernier[LIVRE_TITRE_MAX] = "";   /* le dernier livre lu (NVS) */
+static int   livre_derniere_page = 0;
+
+static bool txt_nom(const char *n)
+{
+    size_t l = strlen(n);
+    if (l < 5 || n[l - 4] != '.') return false;
+    char a = n[l - 3] | 0x20, b = n[l - 2] | 0x20, c = n[l - 1] | 0x20;
+    return a == 't' && b == 'x' && c == 't';
+}
+
+static void livre_scan(void)
+{
+    livre_n = 0;
+    livre_scan_fait = true;
+    mkdir(LIVRE_DOSSIER, 0777);          /* cree le dossier au premier usage */
+    DIR *d = opendir(LIVRE_DOSSIER);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && livre_n < LIVRE_MAXI) {
+        if (!txt_nom(e->d_name)) continue;
+        snprintf(livre_noms[livre_n], LIVRE_TITRE_MAX, "%s", e->d_name);
+        livre_n++;
+    }
+    closedir(d);
+    for (int i = 1; i < livre_n; i++) {          /* ordre alphabetique */
+        char tmp[LIVRE_TITRE_MAX];
+        snprintf(tmp, sizeof(tmp), "%s", livre_noms[i]);
+        int j = i - 1;
+        while (j >= 0 && strcasecmp(livre_noms[j], tmp) > 0) {
+            snprintf(livre_noms[j + 1], LIVRE_TITRE_MAX, "%s", livre_noms[j]);
+            j--;
+        }
+        snprintf(livre_noms[j + 1], LIVRE_TITRE_MAX, "%s", tmp);
+    }
+}
+
+static void livre_memo(void)
+{
+    nvs_handle_t nh;
+    if (nvs_open("mino", NVS_READWRITE, &nh) != ESP_OK) return;
+    if (livre_pret && livre_dernier[0]) {
+        nvs_set_str(nh, "livnom", livre_dernier);
+        nvs_set_i32(nh, "livpg", livre.page);
+        livre_derniere_page = livre.page;
+    }
+    nvs_commit(nh);
+    nvs_close(nh);
+}
+
+/* ouvre un livre du dossier. page < 0 : on garde la page courante du livre
+   s'il est deja ouvert, sinon la premiere. */
+static bool livre_ouvre(const char *fichier, int page)
+{
+    if (!fichier || !fichier[0]) return false;
+    char chemin[LIVRE_CHEMIN_MAX];
+    snprintf(chemin, sizeof(chemin), LIVRE_DOSSIER "/%s", fichier);
+    bool meme = livre_pret && !strcmp(livre_dernier, fichier);
+    int p = (page >= 0) ? page : (meme ? livre.page : 0);
+    livre_ferme(&livre);
+    livre_pret = livre_charge(&livre, chemin, LIVRE_COLS, LIVRE_ROWS);
+    if (!livre_pret) {
+        ESP_LOGW(TAG, "livre : %s illisible", chemin);
+        livre_dernier[0] = 0;
+        return false;
+    }
+    livre_va(&livre, p);
+    snprintf(livre_dernier, sizeof(livre_dernier), "%s", fichier);
+    livre_derniere_page = livre.page;
+    ESP_LOGI(TAG, "livre : %s, %d lignes, %d pages (%d o)", livre.nom,
+             livre.nlignes, livre_pages(&livre), livre.len);
+    return true;
+}
+
+/* (re)ouvre le livre de la derniere session, ou le premier du dossier */
+static bool livre_reprise(void)
+{
+    if (livre_pret) return true;                 /* deja ouvert : rien a relire */
+    if (!livre_scan_fait) livre_scan();
+    if (livre_n == 0) return false;
+    bool connu = false;
+    for (int i = 0; i < livre_n; i++)
+        if (livre_dernier[0] && !strcasecmp(livre_noms[i], livre_dernier)) connu = true;
+    if (connu && livre_ouvre(livre_dernier, livre_derniere_page)) return true;
+    return livre_ouvre(livre_noms[0], 0);
+}
+
+static void livre_suivant(int d)
+{
+    livre_scan();                        /* un livre ajoute a la carte doit apparaitre */
+    if (livre_n < 2) { ui_beep(); return; }
+    int k = 0;
+    for (int i = 0; i < livre_n; i++)
+        if (!strcasecmp(livre_noms[i], livre_dernier)) k = i;
+    k = (k + d + livre_n) % livre_n;
+    if (livre_ouvre(livre_noms[k], 0)) livre_memo();
+}
+
+static bool livre_tourne(int d)
+{
+    if (!livre_pret) return false;
+    bool change = livre_avance(&livre, d);
+    if (change) livre_memo();
+    return change;
+}
+
+/* quitte la page : la page courante est deja notee, on rend la PSRAM */
+static void livre_arret(void)
+{
+    if (livre_pret) livre_memo();
+    livre_ferme(&livre);
+    livre_pret = false;
+}
+
+static void draw_app_livre(void)
+{
+    if (livre_pret) { livre_dessine(&livre); return; }
+
+    a_text(6, 2, 3, "LIVRES");
+    a_hline(4, 195, 19, 1);
+    if (livre_n == 0)
+        texte_grand(40, 2, "AUCUN LIVRE. POSER DES FICHIERS TXT DANS LE DOSSIER LIVRES DE LA CARTE.", 8);
+    else
+        texte_grand(40, 2, "LE LIVRE N A PAS PU ETRE OUVERT. VERIFIER LA CARTE.", 5);
+    a_text_c(100, 186, 1, "OU /LIVRE?OP=LISTE");
+}
+
+
 /* ---- anti-clignotement : on n'envoie une image QUE si elle a change ----
    Un rafraichissement partiel de cette dalle coute 865 ms et fait clignoter
    tout l'ecran. Avant, la promenade du compagnon appelait show_ui() toutes les
@@ -3024,6 +3180,7 @@ static void show_ui(void)
         case PAGE_HIST:    draw_app_hist();   break;
         case PAGE_YT:      draw_app_youtube(); break;
         case PAGE_CONSEIL: draw_app_conseil(); break;
+        case PAGE_LIVRE:   draw_app_livre();  break;
         case PAGE_REG:     draw_app_reglages(); break;
         default:           draw_app_sys();     break;
         }
@@ -3440,6 +3597,25 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         return;
     }
     if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
+    /* page LIVRE : les deux boutons tournent les pages du livre. La dalle met
+       ~0,9 s a passer une page ; enchainer plus vite la laisserait en BUSY
+       (panne), alors on attend plutot que de perdre l'appui. */
+    if (ui_page == PAGE_LIVRE) {
+        static int64_t dernier_feuillet = 0;
+        int64_t t = esp_timer_get_time() / 1000;
+        if (dernier_feuillet && t - dernier_feuillet < 1000)
+            vTaskDelay(pdMS_TO_TICKS(1000 - (t - dernier_feuillet)));
+        dernier_feuillet = esp_timer_get_time() / 1000;
+        if (!livre_pret) livre_reprise();
+        if (livre_pret) {
+            if (!livre_tourne(n == 0 ? 1 : -1)) ui_beep();   /* deja au bout */
+            show_ui();
+        } else {
+            ui_beep();
+            show_ui();
+        }
+        return;
+    }
     /* une tache tourne : l'appui simple l'arrete au lieu de tourner la page */
     if (wake_busy || radio_etat || voix_etat) {
         tache_arrete();
@@ -3493,6 +3669,12 @@ static void bouton_double(int n)
         if (rep_ouvert) { rep_ferme(); show_ui(); }
         ESP_LOGI(TAG, "bouton 1 : double appui -> assistant");
         assistant_wake();
+        return;
+    }
+    if (ui_page == PAGE_LIVRE) {         /* double 2 : le livre suivant */
+        if (!livre_pret) livre_reprise();
+        livre_suivant(1);
+        show_ui();
         return;
     }
     ESP_LOGI(TAG, "bouton 2 : double appui (reserve)");
@@ -3779,6 +3961,7 @@ static void rotation_tick(void)
     if (!rotation_on || rotation_s <= 0) return;
     if (act_on || wake_busy || rep_ouvert || alarme_on) return;
     if (ui_page == PAGE_REG) return;                 /* le clavier, pas une page d'info */
+    if (ui_page == PAGE_LIVRE) return;               /* on ne tourne pas les pages d'un livre */
     int64_t t = esp_timer_get_time() / 1000;
     if (geste_ms && t - geste_ms < ROTATION_PAUSE_MS) return;
     if (!rotation_ms) { rotation_ms = t; return; }   /* on demarre le compte ici */
@@ -8161,6 +8344,84 @@ static esp_err_t h_part(httpd_req_t *req)
     return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "op inconnu");
 }
 
+/* ---- LE LIVRE : /livre ---------------------------------------------
+   /livre                       l'etat du lecteur
+   /livre?op=liste              les .txt du dossier /sdcard/livres
+   /livre?op=ouvre&f=nom.txt&n=3
+   /livre?op=page&n=12          (1 = premiere page)
+   /livre?op=suiv&d=1           tourner de d pages (d negatif : en arriere)
+   /livre?op=change&d=1         livre suivant / precedent
+   /livre?op=ferme              fermer et revenir a l'accueil
+   Tout passe par le meme chemin que les boutons : la page s'affiche. */
+static cJSON *livre_json(void)
+{
+    cJSON *r = cJSON_CreateObject();
+    if (!r) return NULL;
+    cJSON_AddBoolToObject(r, "ouvert", livre_pret);
+    cJSON_AddStringToObject(r, "fichier", livre_dernier);
+    cJSON_AddStringToObject(r, "nom", livre_pret ? livre.nom : "");
+    cJSON_AddNumberToObject(r, "page", livre_pret ? (double)(livre.page + 1) : 0);
+    cJSON_AddNumberToObject(r, "pages", livre_pret ? (double)livre_pages(&livre) : 0);
+    cJSON_AddNumberToObject(r, "pct", livre_pret ? (double)livre_pct(&livre) : 0);
+    cJSON_AddNumberToObject(r, "lignes", livre_pret ? (double)livre.nlignes : 0);
+    cJSON_AddNumberToObject(r, "livres", (double)livre_n);
+    cJSON_AddStringToObject(r, "dossier", LIVRE_DOSSIER);
+    return r;
+}
+
+static esp_err_t h_livre(httpd_req_t *req)
+{
+    char op[12] = "", f[LIVRE_TITRE_MAX] = "", v[12] = "";
+    int n = -1, d = 1;
+    qval(req, "op", op, sizeof(op));
+    qval(req, "f", f, sizeof(f));
+    if (qval(req, "n", v, sizeof(v)) == ESP_OK && v[0]) n = atoi(v);
+    if (qval(req, "d", v, sizeof(v)) == ESP_OK && v[0]) d = atoi(v);
+
+    if (!strcmp(op, "liste")) {
+        livre_scan();                        /* toujours a jour : on vient d'uploader */
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "dossier", LIVRE_DOSSIER);
+        cJSON_AddBoolToObject(r, "sd", sd_ok);
+        cJSON *a = cJSON_AddArrayToObject(r, "livres");
+        for (int i = 0; i < livre_n; i++)
+            cJSON_AddItemToArray(a, cJSON_CreateString(livre_noms[i]));
+        return send_json(req, r);
+    }
+    if (!strcmp(op, "ouvre")) {
+        if (!f[0] || strchr(f, '/') || strstr(f, ".."))
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "f=nom.txt");
+        if (!livre_ouvre(f, n > 0 ? n - 1 : 0))
+            return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "livre illisible");
+        livre_memo();
+        ui_page = PAGE_LIVRE;
+        show_ui();
+    } else if (!strcmp(op, "page")) {
+        if (!livre_pret) livre_reprise();
+        if (!livre_pret) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "aucun livre");
+        if (n > 0) { livre_va(&livre, n - 1); livre_memo(); }
+        ui_page = PAGE_LIVRE;
+        show_ui();
+    } else if (!strcmp(op, "suiv") || !strcmp(op, "avance")) {
+        if (!livre_pret) livre_reprise();
+        if (!livre_pret) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "aucun livre");
+        if (d == 0) d = 1;
+        livre_tourne(d);
+        ui_page = PAGE_LIVRE;
+        show_ui();
+    } else if (!strcmp(op, "change")) {
+        if (!livre_pret) livre_reprise();
+        livre_suivant(d ? d : 1);
+        ui_page = PAGE_LIVRE;
+        show_ui();
+    } else if (!strcmp(op, "ferme")) {
+        livre_arret();
+        ui_page = PAGE_MAITRE;
+        show_ui();
+    }
+    return send_json(req, livre_json());
+}
+
 static esp_err_t h_sd_list(httpd_req_t *req)
 {
     /* /sd            -> racine de la carte
@@ -8323,6 +8584,8 @@ static esp_err_t h_sd_format(httpd_req_t *req)
         /* le montage reste valide apres format ; on recree l'arborescence */
         mkdir("/sdcard/mino", 0777);
         mkdir("/sdcard/backup", 0777);
+        mkdir("/sdcard/livres", 0777);
+        livre_scan_fait = false;         /* le dossier vient d'etre (re)cree */
         sd_ok = true;
     }
     cJSON_AddBoolToObject(r, "ok", err == ESP_OK);
@@ -9156,6 +9419,55 @@ static void mino_handle_line(const char *line)
         ESP_LOGI(TAG, "youtube : chaine='%s' id='%s' nom='%s' video='%s' (%d vues, %s)",
                  yt_handle, yt_id, yt_nom, yt_titre, yt_vues, yt_age);
         show_ui();
+        return;
+    }
+    if (!strcmp(line, "livre") || !strncmp(line, "livre ", 6)) {
+        /* livre | livre liste | livre ouvre <nom> [page] | livre page <n>
+           | livre suiv | livre prec | livre change */
+        char quoi[16] = "", arg[LIVRE_TITRE_MAX] = "";
+        int lu = sscanf(line, "livre %15s %39s", quoi, arg);
+        if (lu <= 0) {
+            if (!livre_scan_fait) livre_scan();
+        } else if (!strcmp(quoi, "liste")) {
+            livre_scan();
+            ESP_LOGI(TAG, "livres : %d dans %s", livre_n, LIVRE_DOSSIER);
+            for (int i = 0; i < livre_n; i++) ESP_LOGI(TAG, "  %d  %s", i + 1, livre_noms[i]);
+            return;
+        } else if (!strcmp(quoi, "ouvre")) {
+            int pg = 0;
+            sscanf(line, "livre ouvre %39s %d", arg, &pg);
+            if (livre_ouvre(arg, pg > 0 ? pg - 1 : 0)) {
+                livre_memo();
+                ui_page = PAGE_LIVRE;
+                show_ui();
+            } else {
+                ESP_LOGW(TAG, "livre : %s illisible", arg);
+                return;
+            }
+        } else if (!strcmp(quoi, "page")) {
+            if (!livre_pret) livre_reprise();
+            int pg = atoi(arg);
+            if (livre_pret && pg > 0) { livre_va(&livre, pg - 1); livre_memo(); }
+            ui_page = PAGE_LIVRE;
+            show_ui();
+        } else if (!strcmp(quoi, "suiv") || !strcmp(quoi, "prec")) {
+            if (!livre_pret) livre_reprise();
+            livre_tourne(!strcmp(quoi, "suiv") ? 1 : -1);
+            ui_page = PAGE_LIVRE;
+            show_ui();
+        } else if (!strcmp(quoi, "change")) {
+            if (!livre_pret) livre_reprise();
+            livre_suivant(1);
+            ui_page = PAGE_LIVRE;
+            show_ui();
+        } else {
+            ESP_LOGW(TAG, "livre : commande inconnue (%s)", quoi);
+            return;
+        }
+        ESP_LOGI(TAG, "livre : %s page %d/%d, %d livre(s) sur la carte",
+                 livre_pret ? livre.nom : "aucun",
+                 livre_pret ? livre.page + 1 : 0,
+                 livre_pret ? livre_pages(&livre) : 0, livre_n);
         return;
     }
     if (!strcmp(line, "ui") || !strncmp(line, "ui ", 3)) {
@@ -10035,6 +10347,12 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "radio_etat", (double)radio_etat);
     cJSON_AddStringToObject(r, "radio_station", radios_n > 0 ? radios_nom[radio_sel] : "");
     cJSON_AddStringToObject(r, "page", ui_page < PAGE_COUNT ? PAGE_NOM[ui_page] : "?");
+    cJSON_AddStringToObject(r, "livre", livre_pret ? livre.nom : "");
+    cJSON_AddStringToObject(r, "livre_fichier", livre_dernier);
+    cJSON_AddNumberToObject(r, "livre_page", livre_pret ? (double)(livre.page + 1) : 0);
+    cJSON_AddNumberToObject(r, "livre_pages", livre_pret ? (double)livre_pages(&livre) : 0);
+    cJSON_AddNumberToObject(r, "livre_pct", livre_pret ? (double)livre_pct(&livre) : 0);
+    cJSON_AddNumberToObject(r, "livres_sd", (double)livre_n);
     {
         time_t t = time(NULL);
         struct tm tm;
@@ -10257,6 +10575,7 @@ static void api_start(void)
     u.handler = h_pet;  u.uri = "/pet";  httpd_register_uri_handler(srv, &u);
     u.handler = h_radio; u.uri = "/radio"; httpd_register_uri_handler(srv, &u);
     u.handler = h_sd_list; u.uri = "/sd"; httpd_register_uri_handler(srv, &u);
+    u.handler = h_livre; u.uri = "/livre"; httpd_register_uri_handler(srv, &u);
     u.handler = h_sd_format; u.uri = "/sdformat"; httpd_register_uri_handler(srv, &u);
     u.handler = h_swap; u.uri = "/swap"; httpd_register_uri_handler(srv, &u);
     u.handler = h_part; u.uri = "/part"; httpd_register_uri_handler(srv, &u);
@@ -10348,6 +10667,13 @@ extern "C" void app_main(void)
             if (nvs_get_i32(nh, "rot", &v) == ESP_OK) rotation_on = (v != 0);
             if (nvs_get_i32(nh, "rots", &v) == ESP_OK && v >= 5 && v <= 600) rotation_s = (int)v;
             if (nvs_get_i32(nh, "voixsortie", &v) == ESP_OK) voix_sortie = (v != 0);
+            {
+                size_t sl = sizeof(livre_dernier);
+                if (nvs_get_str(nh, "livnom", livre_dernier, &sl) != ESP_OK)
+                    livre_dernier[0] = 0;
+                if (nvs_get_i32(nh, "livpg", &v) == ESP_OK && v >= 0)
+                    livre_derniere_page = (int)v;
+            }
             nvs_close(nh);
         }
     }

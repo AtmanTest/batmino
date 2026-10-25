@@ -13,14 +13,15 @@ sujet**. Pas de fourre-tout.
 | 3 SYSTEM | le banc | cpu, ram, psram, watts, réseau, carte SD et flash |
 | 4 HISTORIQUE | le journal | les derniers échanges lus sur la carte |
 | 5 YOUTUBE | la chaîne | la dernière vidéo, ses vues, son âge (voir 08-youtube.md) |
+| 6 LIVRE | le lecteur | le livre en cours, une page pleine (voir 09-livre.md) |
 
 La page RÉGLAGES (`PAGE_REG`, hors cycle) existe toujours dans le code pour le
 clavier Wi-Fi ; elle n'est plus dans la rotation.
 
 ## Comment c'est fait
 
-- `PAGE_MAITRE` 0, `PAGE_METEO` 1, `PAGE_TIMER` 2, `PAGE_SYS` 3, `PAGE_HIST` 4,
-  `PAGE_COUNT` 5, `PAGE_REG` 5 (hors cycle).
+- `PAGE_MAITRE` 0, `PAGE_METEO` 1, `PAGE_SYS` 2, `PAGE_HIST` 3, `PAGE_YT` 4,
+  `PAGE_CONSEIL` 5, `PAGE_LIVRE` 6, `PAGE_COUNT` 7, `PAGE_REG` 7 (hors cycle).
 - `show_ui()` aiguille sur une fonction `draw_app_*` par page, et rien d'autre.
 - La météo, qui était sur l'accueil, a déménagé sur sa page ; le nom de la borne
   Wi-Fi a suivi sur SYSTEM.
