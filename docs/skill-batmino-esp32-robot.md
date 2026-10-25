@@ -506,3 +506,40 @@ carillon (et annule la voix si on appuie pendant). `bouton_court()` teste
   `ms_boucle` (une par minute), PAS apres le test `ms_prochain` : place la
   bas, il n'etait evalue qu'une fois toutes les 5 min et la sonnerie partait
   en retard.
+
+## Le livre (v1.0) : un e-reader sur 200x200
+
+Page LIVRE, 7e du cycle. Un `.txt` par livre dans `/sdcard/livres` (le dossier
+est cree au premier scan).
+
+- **Un octet par caractere affiche.** `livre_encode()` convertit l'UTF-8 en
+  indices de glyphe au chargement. La pagination compte alors des colonnes et
+  jamais des octets : plus aucune conversion pendant la tourne de page, et le
+  rendu lit directement `FONT5[code-1]`.
+- `0xFF` = fin de ligne, `0xFE` = fin de paragraphe (ligne vide). Un seul octet
+  de controle suffit a distinguer un vers d'un paragraphe ; les confondre
+  donnait une ligne vide entre chaque vers (les fleurs du mal : 633 pages au
+  lieu de 456).
+- Police `font5.cpp` : 5x10, generee par `tools/gen_font5.py` depuis la 5x7
+  d'Adafruit (`tools/glcdfont.c`, domaine public). Les accents occupent les
+  lignes 1-2 au-dessus de la hauteur d'x ; les majuscules accentuees n'ont
+  qu'une ligne (0) et se decalent d'un pixel vers le bas pour le cedille.
+  **Ne pas editer font5.cpp a la main** : relancer le generateur.
+- `livre_dessine()` vit dans `livre.cpp`, pas dans `main.cpp` : `tools/preview
+  livre fichier.txt 35` rend exactement la page de la carte, y compris
+  l'en-tete et le pied.
+- Tourner une page = un rafraichissement **partiel** (865 ms). Enchainer deux
+  appuis plus vite que 1 s met la dalle en BUSY : `bouton_court()` attend le
+  reste du delai plutot que de jeter l'appui. Refresh complet tous les 10
+  partiels, comme partout.
+- La position (fichier + page) va en NVS (`livnom`, `livpg`) a chaque tour de
+  page ; quitter la page rend la PSRAM (`livre_arret()`), y revenir relit le
+  fichier. Verifier la reprise : `reset` puis `/bouton?p=6`.
+- La rotation automatique est coupee sur cette page (`rotation_tick`), sinon
+  elle volerait la lecture au bout de 30 s.
+- EPUB -> TXT sur le PC : `tools/epub2txt.py` (ordre du spine, entites,
+  cesures recollees, vers serres, paragraphes detaches par un blanc quand le
+  bloc depasse 110 caracteres), puis
+  `curl --data-binary @livre.txt 'http://192.168.8.209/fichier?p=/livres/x.txt'`.
+- Preuve visuelle sans USB : `/ecran?raw=1` rend le framebuffer en hexa,
+  5000 octets, et `tools/shot.py` en fait un PNG.
