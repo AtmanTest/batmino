@@ -28,11 +28,10 @@ typedef struct {
 
     /* --- energie --- */
     int  bat_pct;                 /* -1 = pas de batterie (USB) */
-    int  conso_mw;                /* -1 = inconnu */
 
     /* --- capteur interne (SHTC3) --- */
     bool  capteur;                /* false : on ecrit N.D. */
-    float temp_int, humi;
+    float temp_int;
 
     /* --- meteo (Open-Meteo, par le reseau) --- */
     bool  meteo;
@@ -40,20 +39,15 @@ typedef struct {
     char  meteo_txt[24];
     int   dem_min, dem_max, dem_pluie;   /* -999 = inconnu */
 
-    /* --- compagnon (ses quatre jauges, 0..100, -1 = inconnu) --- */
-    int  faim, bonheur, energie, sante;
 
     /* --- agenda --- */
     char rdv_quand[24];           /* "DANS 45 MIN", "DEMAIN 09:00", "" = rien */
     char rdv_qui[28];
     int  rappels;                 /* minuteurs en cours */
 
-    /* --- ce qu'il a dit en dernier --- */
-    char dernier[TAB_TXT_MAX];
 
     /* --- etat --- */
     bool alarme;
-    int  visage;                  /* 0 joie, 1 neutre, 2 peine, 3 endormi */
 } tableau_t;
 
 /* dessine la page entiere dans le framebuffer courant (art_begin deja fait) */

@@ -20,7 +20,7 @@ def main() -> int:
         print("marqueurs @@ROUTEUR_DEBUT@@ / @@ROUTEUR_FIN@@ absents de " + SRC)
         return 1
     bloc = src.split("/* @@ROUTEUR_DEBUT@@ */", 1)[1].split("/* @@ROUTEUR_FIN@@ */", 1)[0]
-    if "page_act" not in bloc or "bouton_long" not in bloc:
+    if "bouton_court" not in bloc or "bouton_long" not in bloc:
         print("le bloc extrait ne ressemble pas au routeur")
         return 1
     open(sortie, "w", encoding="utf8").write(bloc)

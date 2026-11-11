@@ -142,26 +142,6 @@ static void ring(int cx, int cy, int r, int t, int black)
     }
 }
 
-static void ellipse_fill(int cx, int cy, int rx, int ry, int black)
-{
-    for (int y = -ry; y <= ry; y++)
-        for (int x = -rx; x <= rx; x++) {
-            float v = (float)(x * x) / (float)(rx * rx) + (float)(y * y) / (float)(ry * ry);
-            if (v <= 1.0f) px(cx + x, cy + y, black);
-        }
-}
-
-static void ellipse_ring(int cx, int cy, int rx, int ry, int t, int black)
-{
-    for (int y = -ry - t; y <= ry + t; y++)
-        for (int x = -rx - t; x <= rx + t; x++) {
-            float v = (float)(x * x) / (float)(rx * rx) + (float)(y * y) / (float)(ry * ry);
-            float vi = (float)(x * x) / (float)((rx - t) * (rx - t)) +
-                       (float)(y * y) / (float)((ry - t) * (ry - t));
-            if (v <= 1.0f && vi >= 1.0f) px(cx + x, cy + y, black);
-        }
-}
-
 static void seg(int x0, int y0, int x1, int y1, int t)
 {
     int dx = abs(x1 - x0), dy = -abs(y1 - y0);
@@ -188,23 +168,6 @@ static void arc(int cx, int cy, int r, float a0, float a1, int t)
     }
 }
 
-static void tri_fill(int x0, int y0, int x1, int y1, int x2, int y2)
-{
-    int minx = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
-    int maxx = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
-    int miny = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
-    int maxy = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
-    for (int y = miny; y <= maxy; y++)
-        for (int x = minx; x <= maxx; x++) {
-            float d1 = (float)((x1 - x0) * (y - y0) - (y1 - y0) * (x - x0));
-            float d2 = (float)((x2 - x1) * (y - y1) - (y2 - y1) * (x - x1));
-            float d3 = (float)((x0 - x2) * (y - y2) - (y0 - y2) * (x - x2));
-            int neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-            int pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-            if (!(neg && pos)) px(x, y, 1);
-        }
-}
-
 /* BATMino : tout le dessin du personnage vit maintenant dans art.cpp */
 /* ------------------------------------------------------------------ */
 /* ecran                                                               */
@@ -223,7 +186,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-11-11 gros-caracteres-2"
+#define APP_VER "2026-11-11 purge"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -301,7 +264,6 @@ static esp_err_t qval(httpd_req_t *req, const char *key, char *out, size_t sz);
 static void draw_status_bar(void);
 static void tableau_maitre(void);          /* la page unique, definie plus bas */
 
-/* cinq applis, une par ecran : voir les draw_app_* plus bas */
 /*  Ecrans du BATMino autonome :
  *   0 MAITRE    tableau de bord : heure, date, meteo, wifi, petite tete
  *   1 PARLER    l'assistant vocal : micro, puis ce qu'il dit
@@ -310,37 +272,8 @@ static void tableau_maitre(void);          /* la page unique, definie plus bas *
  *   4 MEMOIRE  ce qu'il sait
  *   5 RADIO     la radio (le PC n'est plus necessaire)
  */
-#define PAGE_MAITRE 0                     /* ACCUEIL : l'heure, la date, le prochain rdv */
-/* une appli par page, comme les premieres versions : chaque ecran a son sujet
-   et rien d'autre */
-#define PAGE_METEO  1                     /* METEO    : le ciel, aujourd'hui et demain */
-#define PAGE_SYS    2                     /* SYSTEM   : cpu, ram, watts, reseau, stockage */
-#define PAGE_HIST   3                     /* HISTORIQUE : les derniers echanges */
-#define PAGE_YT     4                     /* YOUTUBE  : la chaine, derniere video */
-#define PAGE_CONSEIL 5                    /* CONSEIL  : ce que la carte juge utile de
-                                             dire maintenant (une passe de cerveau) */
-#define PAGE_MATRIX 6                     /* MATRIX   : l'analyse du systeme, sequence
-                                             de pluie de code puis rapport */
-#define PAGE_LIVRE  7                     /* LIVRE    : le lecteur de livres (e-reader).
-                                             EN DERNIER : sur cette page les deux boutons
-                                             tournent les pages du livre, donc une page
-                                             placee apres serait injoignable au bouton 1 */
-#define PAGE_LANC   8                     /* LE LAUNCHER : la grille des applis.
-                                             Hors cycle : on y entre par l'APPUI
-                                             LONG DU BOUTON 1 depuis ACCUEIL. */
-#define PAGE_REG    9                     /* REGLAGES : hors cycle (jugee mal faite),
-                                             joignable par /reglages et le web */
-#define PAGE_COUNT  1                     /* UNE seule page : le tableau. Le cycle
-                                             des 8 applis a disparu le 11/11 ; leurs
-                                             fonctions draw_app_* restent dans le
-                                             fichier mais ne sont plus dans la
-                                             rotation (LIVRE se rejoint au long du
-                                             bouton 2, REGLAGES par le web). */
-/* PAGE_NOM couvre AUSSI les pages hors cycle : les journaux indexent par ui_page
-   sans garde, une table trop courte lisait hors bornes. */
-static const char *PAGE_NOM[PAGE_REG + 1] = {"ACCUEIL", "METEO", "SYSTEM",
-                                             "HISTORIQUE", "YOUTUBE", "CONSEIL",
-                                             "MATRIX", "LIVRE", "LANCER", "REGLAGES"};
+/* une seule page depuis le 11/11 : le tableau */
+#define PAGE_MAITRE 0
 
 /* ---- LE CONSEIL : la seule page qui n'affiche pas une donnee mais un
    jugement. Une passe de cerveau -- periodique, ou demandee au bouton 1 --
@@ -356,20 +289,15 @@ static volatile bool conseil_demande = false;   /* passe forcee (bouton / HTTP) 
 static volatile int  conseil_passes = 0;        /* passes reussies, pour /state */
 static volatile int  conseil_etat = 0;          /* 1 ok, 2 pas de cle, 3 pas de wifi,
                                                    4 session en cours, 5 cerveau muet */
-static void draw_app_conseil(void);
 static void conseil_tache(void *arg);
 /* MATRIX : la sequence est pilotee par une tache, declaree ici pour que
    appli_entre/appli_sort puissent la lancer et l'arreter. */
-static void draw_app_matrix(void);
-static void draw_app_lanc(void);
 static void mtx_lance(void);
 static void mtx_stop(void);
 static void mtx_tick(void);
 
 /* defilement de la page HISTORIQUE : nombre de messages remontes dans le passe */
 static int hist_vue = 0;
-static void draw_app_hist(void);
-static void draw_app_livre(void);
 static bool livre_reprise(void);
 static void livre_arret(void);
 
@@ -482,16 +410,6 @@ static int   stt_ecrits = 0;             /* octets audio effectivement envoyes *
 static int   stt_total = 0;              /* octets audio prevus */
 static char  stt_detail[130] = "";       /* debut de la reponse, pour diagnostiquer */
 
-/* l'humeur du compagnon : 0 ravi, 1 tranquille, 2 triste, 3 endormi */
-static int kirby_etat(void)
-{
-    if (pet.endormi) return 3;
-    switch (current_emotion) {
-    case 0: case 9: case 10:                 return 0;   /* joie, fierte, tendresse */
-    case 1: case 3: case 5: case 11: case 13: return 2;   /* tristesse, peur, degout, gene, douleur */
-    default:                                 return 1;
-    }
-}
 static SemaphoreHandle_t ui_mux = NULL;
 static esp_err_t send_json(httpd_req_t *req, cJSON *root);
 static void monde_maj_info(monde_info_t *mi);
@@ -504,25 +422,6 @@ static cJSON *mem_obj;                           /* les notes qu'il a apprises *
    un cadre noir, une phrase courte, elle part toute seule. */
 static char     toast_txt[40] = {0};
 static uint32_t toast_fin_ms = 0;
-static void toast_pose(const char *t, int ms)
-{
-    snprintf(toast_txt, sizeof(toast_txt), "%s", t);
-    toast_fin_ms = (uint32_t)(esp_timer_get_time() / 1000) + ms;
-    show_ui();
-}
-static void toast_dessine(void)
-{
-    if (!toast_txt[0]) return;
-    if ((uint32_t)(esp_timer_get_time() / 1000) > toast_fin_ms) return;
-    {
-        int w = a_text_w(1, toast_txt) + 10;
-        int x0 = 100 - w / 2, y0 = 118;
-        for (int y = y0; y < y0 + 15; y++)
-            for (int x = x0; x < x0 + w; x++) a_px(x, y, 1);
-        a_text_col(x0 + 5, y0 + 5, 1, toast_txt, 0);
-    }
-}
-
 static void show_face(int e)
 {
     if (e < 0 || e >= EXPR_N) e = 0;
@@ -636,22 +535,6 @@ static void icon_gear(int cx, int cy, int r, int t)
         int y1 = cy - (int)lroundf((float)(r + 4) * sinf(rad));
         seg(x0, y0, x1, y1, 1);
     }
-}
-
-static void icon_speaker(int cx, int cy)
-{
-    tri_fill(cx - 12, cy - 6, cx - 12, cy + 6, cx - 2, cy + 2);
-    tri_fill(cx - 12, cy - 6, cx - 2, cy - 2, cx - 2, cy + 2);
-    hline(cx - 13, cx - 2, cy - 6, 1);
-    hline(cx - 13, cx - 2, cy + 6, 1);
-    arc(cx - 2, cy, 9, -50, 50, 2);
-    arc(cx - 2, cy, 15, -45, 45, 2);
-}
-
-static void icon_power(int cx, int cy, int r)
-{
-    arc(cx, cy, r, -60, 240, 2);
-    seg(cx, cy - r - 4, cx, cy - 1, 2);
 }
 
 static void icon_pig_small(int cx, int cy) { ic_bat_small(cx, cy, 9); }
@@ -853,61 +736,6 @@ static void secu_sweep_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static void secu_padlock(int cx, int cy, int s)
-{
-    ring(cx, cy - 6, 5, 2, 1);
-    for (int dy = 0; dy < 12; dy++)
-        for (int dx = 0; dx < 14; dx++) {
-            int e = (dx == 0 || dy == 0 || dx == 13 || dy == 11);
-            if (e) px(cx - 7 + dx, cy + dy, 1);
-        }
-    px(cx, cy + 4, 1); px(cx, cy + 5, 1); (void)s;
-}
-
-static void draw_page_secu(void)
-{
-    char b[52];
-
-    draw_text(8, 30, 2, "SECU");
-    draw_text(52, 33, 1, "ANALYSE RESEAU");
-    secu_padlock(180, 28, 1);
-
-    snprintf(b, sizeof(b), "SSID %.34s", sec_ssid);
-    draw_text(6, 48, 1, b);
-
-    snprintf(b, sizeof(b), "%.8s %.7s CANAL %d %dDBM", sec_auth, sec_ciph, sec_chan, sec_rssi);
-    draw_text(6, 58, 1, b);
-
-    snprintf(b, sizeof(b), "IP %s", sec_ip);
-    draw_text(6, 68, 1, b);
-
-    snprintf(b, sizeof(b), "PASSERELLE %s %s", sec_gw, sec_gw_ok ? "OK" : "KO");
-    draw_text(6, 78, 1, b);
-
-    snprintf(b, sizeof(b), "DNS %s %s", sec_dns, sec_dns_ok ? "OK" : "KO");
-    draw_text(6, 88, 1, b);
-
-    snprintf(b, sizeof(b), "INTERNET %s", sec_net_ok ? "OK" : "KO");
-    draw_text(6, 98, 1, b);
-
-    if (sec_sweep)      { snprintf(b, sizeof(b), "MACHINES LOCALES %d+", sec_hotes < 0 ? 0 : sec_hotes); draw_text(6, 108, 1, b); }
-    else if (sec_hotes < 0) draw_text(6, 108, 1, "MACHINES LOCALES : ?");
-    else { snprintf(b, sizeof(b), "MACHINES LOCALES : %d", sec_hotes); draw_text(6, 108, 1, b); }
-
-    snprintf(b, sizeof(b), "RESEAUX VOISINS %d DONT %d OUVERTS", sec_aps, sec_open);
-    draw_text(6, 118, 1, b);
-
-    draw_text(6, 128, 1, "PORT 80 API SANS JETON");
-    snprintf(b, sizeof(b), "WPS %s  WPA3 %s", sec_wps ? "OUI" : "NON", sec_wpa3 ? "OUI" : "NON");
-    draw_text(6, 138, 1, b);
-
-    hline(4, 195, 150, 1);
-
-    snprintf(b, sizeof(b), "RISQUE %d/5", sec_risque);
-    draw_text(6, 158, 1, b);
-    draw_text(6, 172, 1, sec_alerte);
-}
-
 static volatile bool secu_busy = false;
 
 /* relance l'analyse en tache separee (ne bloque ni l'ecran ni les boutons) */
@@ -918,12 +746,6 @@ static void secu_refresh_task(void *a)
     if (ui_page == 99) show_ui();
     secu_busy = false;
     vTaskDelete(NULL);
-}
-
-static void secu_refresh(void)
-{
-    if (secu_busy) return;
-    xTaskCreate(secu_refresh_task, "secu", 6144, NULL, 3, NULL);
 }
 
 static void secu_sweep(void)
@@ -1109,17 +931,6 @@ static void infos_nettoie(char *s)
 /* texte "gras" : la meme chaine dessinee deux fois, decalee d'un pixel.
    La police 3x5 n'a pas de graisse ; sur une dalle 1 bit c'est le seul
    moyen d'epaissir un mot sans changer de corps. */
-static void a_text_gras(int x, int y, int s, const char *str)
-{
-    a_text_col(x, y, s, str, 1);
-    a_text_col(x + 1, y, s, str, 1);
-}
-
-static void a_text_c_gras(int cx, int y, int s, const char *str)
-{
-    a_text_gras(cx - a_text_w(s, str) / 2, y, s, str);
-}
-
 /* un pas vers la destination ; arrive, il en choisit une autre au hasard */
 static void kirby_promene(void)
 {
@@ -1133,21 +944,6 @@ static void kirby_promene(void)
     else if (kirby_x > kirby_vx) kirby_x -= (kirby_x - kirby_vx < px) ? (kirby_x - kirby_vx) : px;
     if (kirby_y < kirby_vy) kirby_y += (kirby_vy - kirby_y < py) ? (kirby_vy - kirby_y) : py;
     else if (kirby_y > kirby_vy) kirby_y -= (kirby_y - kirby_vy < py) ? (kirby_y - kirby_vy) : py;
-}
-
-/* il se promene tout seul sur la surface blanche, comme un vrai tamagotchi */
-static void promenade_task(void *arg)
-{
-    vTaskDelay(pdMS_TO_TICKS(2500));          /* on laisse la carte demarrer */
-    for (;;) {
-        /* 2 s : chaque image coute 865 ms et fait clignoter la dalle. A 380 ms
-           (avant), le compagnon produisait un stroboscope permanent. */
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        if (!act_on && ui_page == PAGE_MAITRE) {
-            kirby_promene();
-            show_ui();          /* ne rafraichit que s'il a vraiment bouge */
-        }
-    }
 }
 
 /* barre d'etat, hauteur 26 px, en haut */
@@ -1215,48 +1011,6 @@ static int famille_vers_bat5(int famille)
 
 /* bandeau de titre de chaque appli : nom en haut, gros, et une bande
    noire en bas qui porte le sous-titre (l'expression, la reponse...) */
-static void app_titre(const char *nom)
-{
-    a_efill(0, 12, 0, 0, 0);
-    a_hline(0, 199, 0, 3);
-    a_hline(0, 199, 25, 3);
-    a_text(6, 6, 2, nom);
-    /* le rappel des boutons, en petit a droite (pas sur le visage : plein) */
-    if (ui_page == PAGE_SYS)
-        a_text(196 - 6 * 18, 10, 1, "BOUTON 2 = ACCUEIL");
-    else if (ui_page == PAGE_CONSEIL)
-        a_text(196 - a_text_w(1, "LONG 1 = REJUGER"), 10, 1, "LONG 1 = REJUGER");
-}
-
-static void app_bas(const char *txt)
-{
-    a_hline(0, 199, 174, 3);
-    a_hline(0, 199, 175, 3);
-    a_text_c(100, 182, 2, txt);
-}
-
-/* texte en gros, coupe en lignes qui tiennent dans 200 px */
-static int texte_grand(int y, int scale, const char *txt, int maxlignes)
-{
-    int largeur = 200 / (4 * scale);        /* une lettre = 4*scale px */
-    int n = 0;
-    char ligne[64];
-    while (*txt && n < maxlignes) {
-        int l = 0;
-        if (*txt == ' ') txt++;
-        while (txt[l] && l < largeur) l++;
-        while (l > 0 && txt[l] != 0 && txt[l] != ' ') l--;   /* coupe au mot */
-        if (l == 0) l = largeur;
-        if (l >= (int)sizeof(ligne)) l = (int)sizeof(ligne) - 1;
-        memcpy(ligne, txt, (size_t)l);
-        ligne[l] = 0;
-        a_text_c(100, y + n * (7 * scale), scale, ligne);
-        txt += l;
-        n++;
-    }
-    return n;
-}
-
 /* La police de la dalle ne connait que l'ASCII : un accent disparait et le mot
    devient illisible ("OXYGNE"). On translittere le francais avant l'affichage. */
 static void texte_ascii(const char *src, char *dst, size_t sz)
@@ -1361,7 +1115,7 @@ static void rep_ouvre(const char *texte)
 static void rep_ferme(void)
 {
     rep_ouvert = false;
-    if (rep_retour >= 0 && rep_retour < PAGE_COUNT) ui_page = rep_retour;
+    ui_page = PAGE_MAITRE;
 }
 
 static void rep_age_plus(void) { if (rep_page + 1 < rep_pages) rep_page++; }
@@ -1437,58 +1191,6 @@ static time_t minuit_local(time_t t)
     return mktime(&x);
 }
 
-/* ------ prochain rendez-vous : une bande fixe, toujours au meme endroit ------ */
-static void dessine_rdv(void)
-{
-    bool dispo = (ms_debut > 0 && ms_titre[0]);
-    char quand[40] = "";
-    if (dispo) {
-        time_t ts = (time_t)ms_debut;
-        struct tm te;
-        localtime_r(&ts, &te);
-        long jours = (long)((minuit_local(ts) - minuit_local(time(NULL)) + 3600) / 86400);
-        if (jours <= 0)       snprintf(quand, sizeof(quand), "AUJ. %s", ms_heure);
-        else if (jours == 1)  snprintf(quand, sizeof(quand), "DEMAIN %s", ms_heure);
-        else                  /* la date, pas le nom du jour : "22 OCT 16:30" */
-                              snprintf(quand, sizeof(quand), "%d %s %s",
-                                       te.tm_mday, MOIS_COURT[te.tm_mon % 12], ms_heure);
-    }
-    if (dispo && ms_dans >= 0 && ms_dans <= 90) {
-        char lab[24];
-        snprintf(lab, sizeof(lab), "DANS %d MIN", ms_dans);
-        a_text_c_gras(100, 107, 2, lab);
-    } else {
-        a_text_c_gras(100, 107, 2, "PROCHAIN RDV");
-    }
-    if (dispo) {
-        /* la personne qui invite, en gros : c'est ce qu'on veut lire d'un
-           coup d'oeil. 14 signes tiennent en corps 3 dans le cadre ; au-dela
-           on coupe au dernier espace et on ecrit sur deux lignes, ce qui est
-           plus lisible qu'un nom retreci. */
-        const char *nom = ms_org[0] ? ms_org : ms_titre;
-        a_text_c_gras(100, 121, 3, quand);
-        if (strlen(nom) <= 14) {
-            a_text_c_gras(100, 140, 3, nom);
-        } else {
-            char l1[32], l2[32];
-            const char *sp = strrchr(nom, ' ');
-            if (sp && (size_t)(sp - nom) <= 14 && strlen(sp + 1) <= 14) {
-                snprintf(l1, sizeof(l1), "%.*s", (int)(sp - nom), nom);
-                snprintf(l2, sizeof(l2), "%s", sp + 1);
-                a_text_c_gras(100, 140, 3, l1);
-                a_text_c_gras(100, 157, 3, l2);
-            } else {
-                char court[32];
-                snprintf(court, sizeof(court), "%.21s", nom);   /* 21 signes = 165 px */
-                a_text_c_gras(100, 140, 2, court);
-            }
-        }
-    } else {
-        a_text_c_gras(100, 129, 3, "AUCUN");
-    }
-}
-
-
 /* ================================================================== */
 /* LA BANDE : le spectre de la voix, a la place du tamagotchi          */
 /* ================================================================== */
@@ -1547,215 +1249,6 @@ static void draw_app_maitre(void)
 static void appli_sys_entre(void);
 static void appli_sys_sort(void);
 
-static void appli_entre(int p)
-{
-    app_mem_octets = 0;
-    switch (p) {
-    case PAGE_METEO:
-        /* le tampon de la meteo appartient au service reseau : 2 Ko alloues une
-           fois au demarrage. Le liberer ici pendant qu'une lecture TLS ecrit
-           dedans plantait l'allocateur (use-after-free) -> reboot. */
-        meteo_force = true;              /* lecture fraiche a l'ouverture */
-        break;
-    case PAGE_SYS:
-        appli_sys_entre();
-        app_mem_octets = 48 * sizeof(TaskStatus_t);
-        break;
-    case PAGE_HIST:
-        hist_vue = 0;
-        break;
-    case PAGE_LIVRE:
-        livre_reprise();                 /* le livre reprend ou il en etait */
-        break;
-    case PAGE_MATRIX:
-        mtx_lance();                     /* la sequence d'analyse demarre */
-        break;
-    case PAGE_YT:
-        if (!yt_buf) {
-            yt_buf = (char *)heap_caps_malloc(YT_TAILLE, MALLOC_CAP_SPIRAM);
-            yt_buf_taille = yt_buf ? YT_TAILLE : 0;
-        }
-        app_mem_octets = (int)yt_buf_taille;
-        yt_force = true;                 /* lecture fraiche a l'ouverture */
-        break;
-    default:
-        break;
-    }
-    ESP_LOGI(TAG, "appli %s : demarree (%d o prives, interne %u o libres)",
-             PAGE_NOM[p], app_mem_octets,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-}
-
-static void appli_sort(int p)
-{
-    if (p < 0) return;
-    switch (p) {
-    case PAGE_METEO:
-        break;                       /* tampon du service reseau : on n'y touche pas */
-    case PAGE_SYS:
-        appli_sys_sort();
-        break;
-    case PAGE_YT:
-        /* ne JAMAIS liberer pendant que la tache reseau ecrit dedans : c'etait
-           un use-after-free qui plantait l'allocateur. On libere a la fin de la
-           lecture si la page a ete quittee entre-temps. */
-        if (yt_en_cours) yt_a_liberer = true;
-        else if (yt_buf) { free(yt_buf); yt_buf = NULL; yt_buf_taille = 0; }
-        break;
-    case PAGE_LIVRE:
-        livre_arret();                   /* la PSRAM du livre est rendue */
-        break;
-    case PAGE_MATRIX:
-        mtx_stop();                      /* la sequence s'arrete avec la page */
-        break;
-    default:
-        break;
-    }
-    ESP_LOGI(TAG, "appli %s : arretee, %d o rendus (interne %u o libres)",
-             PAGE_NOM[p], app_mem_octets,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    app_mem_octets = 0;
-}
-
-/* suit la page courante : c'est le seul endroit qui tue et lance les applis */
-static void appli_suivre_page(void)
-{
-    if (ui_page == page_app) return;
-    appli_sort(page_app);
-    page_app = ui_page;
-    appli_entre(page_app);
-}
-
-static void draw_app_meteo(void)
-{
-    char b[48], t[16];
-    app_titre("METEO");
-
-    a_text_gras(8, 32, 3, METEO_VILLE);
-
-    if (!meteo_ok) {
-        /* pas de mesure : une seule phrase, pas un ecran de tirets */
-        a_text_c(100, 62, 7, "--");
-        a_text(8, 108, 3, "PAS DE DONNEES");
-        a_text(8, 136, 2, "WIFI NECESSAIRE");
-        return;
-    }
-
-    /* la temperature du moment : tres gros, groupe avec l'icone au centre */
-    snprintf(t, sizeof(t), "%.1fC", (double)meteo_temp);
-    {
-        int wt = a_text_w(6, t);
-        int x0 = 100 - (16 + 12 + wt) / 2;
-        ic_temp(x0 + 8, 70);
-        a_text(x0 + 16 + 12, 56, 6, t);
-    }
-
-    /* l'etat du ciel, en clair */
-    a_text(8, 96, 3, meteo_texte(meteo_code));
-
-    a_hline(6, 193, 118, 1);
-
-    /* demain : la plage de temperatures a droite, le ciel et la pluie en dessous */
-    a_text(8, 126, 2, "DEMAIN");
-    if (meteo_dem_code >= 0) {
-        snprintf(b, sizeof(b), "%d-%dC", (int)meteo_dem_min, (int)meteo_dem_max);
-        a_text(192 - a_text_w(2, b), 126, 2, b);
-        a_text(8, 144, 2, meteo_texte(meteo_dem_code));
-        if (meteo_dem_pluie >= 0) {
-            snprintf(b, sizeof(b), "PLUIE %d%%", meteo_dem_pluie);
-            a_text(192 - a_text_w(2, b), 144, 2, b);
-        }
-    } else {
-        a_text(192 - a_text_w(2, "--"), 126, 2, "--");
-    }
-}
-
-/* ---------- 6. YOUTUBE : la chaine et sa derniere video ---------- */
-static void draw_app_youtube(void)
-{
-    char b[64];
-    app_titre("YOUTUBE");
-
-    if (!yt_id[0] && !yt_handle[0]) {
-        /* pas encore de chaine : on dit comment la regler, sobrement */
-        a_text_c(100, 54, 3, "CHAINE ?");
-        a_text(8, 92, 2, "console :");
-        a_text(8, 108, 2, "yt @moncompte");
-        a_text(8, 136, 2, "ou /yt?c=@moncompte");
-        return;
-    }
-
-    a_text_gras(8, 30, 3, yt_nom[0] ? yt_nom : (yt_handle[0] ? yt_handle : yt_id));
-
-    if (!yt_ok) {
-        a_text_c(100, 66, 6, "--");
-        if (yt_handle[0] || yt_id[0]) {
-            a_text(8, 104, 2, "LECTURE EN COURS");
-            a_text(8, 124, 2, "REVIENS DANS 10 S");
-        } else {
-            a_text(8, 104, 2, "PAS DE DONNEES");
-            a_text(8, 124, 2, "WIFI NECESSAIRE");
-        }
-        return;
-    }
-
-    a_text(8, 60, 2, "DERNIERE VIDEO");
-    a_hline(6, 193, 72, 1);
-    /* titre sur trois lignes maximum, coupe proprement */
-    {
-        char titre[96];
-        snprintf(titre, sizeof(titre), "%s", yt_titre);
-        int l = 0;
-        char *p = titre;
-        while (*p && l < 3) {
-            char ligne[26];
-            int n = (int)strlen(p);
-            if (n > 24) {
-                n = 24;
-                while (n > 8 && p[n] != ' ') n--;
-            }
-            memcpy(ligne, p, n); ligne[n] = 0;
-            a_text(8, 78 + l * 16, 2, ligne);
-            p += n;
-            while (*p == ' ') p++;
-            l++;
-        }
-    }
-    /* les vues a gauche, l'age en dessous a droite (sinon les deux se collent) */
-    if (yt_vues >= 0) {
-        if (yt_vues >= 1000) snprintf(b, sizeof(b), "%d,%d K VUES", yt_vues / 1000, (yt_vues % 1000) / 100);
-        else                 snprintf(b, sizeof(b), "%d VUES", yt_vues);
-        a_text(8, 150, 2, b);
-    }
-    if (yt_age[0]) a_text(192 - a_text_w(2, yt_age), 168, 2, yt_age);
-}
-
-/* ---------- 7. CONSEIL : ce que la carte juge utile de dire ---------- */
-static void draw_app_conseil(void)
-{
-    app_titre("CONSEIL");
-    if (!conseil_passes) {
-        a_text_c(100, 58, 3, "IL OBSERVE");
-        a_text_c(100, 94, 2, "PREMIERE PASSE");
-        a_text_c(100, 110, 2, "EN COURS");
-        if (conseil_faits[0]) a_text_c(100, 146, 2, conseil_faits);
-        return;
-    }
-    if (conseil_vide || !conseil_txt[0]) {
-        a_text_c(100, 50, 6, "RIEN");
-        a_text_c(100, 96, 2, "A SIGNALER");
-        if (conseil_faits[0]) a_text_c(100, 126, 2, conseil_faits);
-    } else {
-        texte_grand(34, 2, conseil_txt, 6);
-        if (conseil_faits[0]) a_text_c(100, 152, 2, conseil_faits);
-    }
-    if (conseil_quand[0]) {
-        char b[24];
-        snprintf(b, sizeof(b), "JUGE A %s", conseil_quand);
-        app_bas(b);
-    }
-}
-
 /* ---------- 2. PAROLES : tout ce qui s'est dit, en texte ---------- */
 #define PAROLES_MAX 48
 static char paroles_lignes[PAROLES_MAX][49];
@@ -1790,27 +1283,6 @@ static void paroles_ajoute(const char *qui, const char *texte)
     paroles_haut = 0;                                   /* on revient sur la fin */
 }
 
-static void draw_app_paroles(void)
-{
-    app_titre("PAROLES");
-    const int par_ecran = 9;
-    int base = paroles_n - par_ecran - paroles_haut;
-    if (base < 0) base = 0;
-    for (int i = 0; i < par_ecran; i++) {
-        int a = base + i;
-        if (a >= paroles_n) break;
-        int idx = (paroles_tete - paroles_n + a + PAROLES_MAX * 2) % PAROLES_MAX;
-        a_text(4, 34 + i * 15, 1, paroles_lignes[idx]);
-    }
-    if (paroles_n == 0)
-        a_text_c(100, 96, 2, "PARLE-MOI !");
-    a_hline(0, 199, 172, 2);
-    char b[48];
-    snprintf(b, sizeof(b), "LIGNE %d/%d", paroles_n - paroles_haut > 0 ? paroles_n - paroles_haut : 0, paroles_n);
-    a_text(4, 180, 1, b);
-    a_text(196 - 6 * 16, 180, 1, "1=DEFILER 2=PAGE");
-}
-
 /* ---------- 1. PARLER ---------- */
 /* etat de l'assistant : 0 au repos, 1 j'ecoute, 2 je reflechis, 3 je reponds */
 // voix_etat declare plus haut (ligne 208)
@@ -1818,104 +1290,6 @@ static char voix_reponse[300] = "";
 static char voix_entendu_txt[300] = "";  /* dernier texte reconnu (lu par /state) */
 static volatile int assist_parle_ms = 12000;  /* duree d'ecoute (12 s par defaut) */
 static volatile bool parler_radio_ouverte = false;  /* test : ne pas couper la radio en ecoutant */
-
-static void draw_micro(int cx, int cy, int h)
-{
-    int w = h / 3;
-    a_efill(cx, cy - h / 3, w / 2, h / 3, 1);          /* capsule */
-    a_ering(cx, cy - h / 3, w / 2, h / 3, 4, 1);
-    a_arc(cx, cy + 2, w / 2 + 10, 200, 340, 4);        /* arceau */
-    a_vline(cx, cy + 14, cy + 26, 4);                  /* pied */
-    a_hline(cx - 16, cx + 16, cy + 28, 6);             /* socle */
-}
-
-static void draw_app_infos(void)
-{
-    app_titre("INFOS");
-    if (!infos_ok) {
-        texte_grand(80, 2, "JE CHERCHE LES INFOS...", 2);
-        return;
-    }
-    int y = 32;
-    for (int i = infos_haut; i < infos_n && y < 176; i++) {
-        int n = texte_grand(y, 1, infos_titre[i], 4);
-        y += n * 7 + 5;
-        if (i + 1 < infos_n && y < 176) a_hline(8, 191, y - 3, 1);
-    }
-}
-
-static void draw_app_parler(void)
-{
-    app_titre("PARLER");
-    switch (voix_etat) {
-    case 1:
-        draw_micro(100, 76, 46);
-        texte_grand(132, 2, "PARLE, JE T'ECOUTE", 2);
-        break;
-    case 2:
-        draw_micro(100, 76, 46);
-        texte_grand(132, 2, "JE REFLECHIS...", 2);
-        break;
-    case 3:
-        /* la reponse : l'ecran entier pour le texte. Aucun dessin devant,
-           sinon on ne lit rien. */
-        texte_grand(34, 2, voix_reponse, 8);
-        break;
-    default:
-        draw_micro(100, 72, 52);
-        texte_grand(134, 2, "RESTE APPUYE SUR LE BOUTON DU HAUT, PUIS PARLE", 3);
-        break;
-    }
-}
-
-/* ---------- 2. MOI (le tamagotchi) ---------- */
-static void draw_app_moi(void)
-{
-    char b[64];
-    pet_action_t besoin;
-    uint8_t coeurs;
-
-    draw_kirby(100, 92, 38, anim_ph, kirby_etat());
-    app_titre("MOI");
-    besoin = pet_besoin(&pet);
-    coeurs = (uint8_t)(pet.bonheur / 100);
-    if (coeurs > 4) coeurs = 4;
-    switch (besoin) {
-    case ACT_MANGER:   snprintf(b, sizeof(b), "J AI FAIM"); break;
-    case ACT_JOUER:    snprintf(b, sizeof(b), "JE M ENNUIE"); break;
-    case ACT_CALIN:    snprintf(b, sizeof(b), "UN CALIN ?"); break;
-    case ACT_NETTOYER: snprintf(b, sizeof(b), "C EST SALE"); break;
-    case ACT_SOIGNER:  snprintf(b, sizeof(b), "JE SUIS MALADE"); break;
-    case ACT_DORMIR:   snprintf(b, sizeof(b), "JE DORS"); break;
-    default:           snprintf(b, sizeof(b), "%s", pet_message(&pet)); break;
-    }
-    app_bas(b);
-    /* quatre coeurs, gros, en haut a droite */
-    for (int i = 0; i < 4; i++) ic_heart(152 + i * 12, 18, 10, i < coeurs);
-}
-
-/* ---------- 3. MEMOIRE ---------- */
-static void draw_app_memoire(void)
-{
-    cJSON *notes = cJSON_GetObjectItem(mem_obj, "notes");
-    int n = notes ? cJSON_GetArraySize(notes) : 0;
-    char b[64];
-    app_titre("MA MEMOIRE");
-    if (n == 0) {
-        texte_grand(60, 2, "JE NE SAIS RIEN ENCORE. PARLE MOI ET J APPRENDS.", 5);
-        return;
-    }
-    snprintf(b, sizeof(b), "JE SAIS %d CHOSES", n);
-    a_text_c(100, 34, 2, b);
-    for (int i = 0; i < n && i < 6; i++) {
-        cJSON *it = cJSON_GetArrayItem(notes, n - 1 - i);
-        if (!cJSON_IsString(it)) continue;
-        snprintf(b, sizeof(b), "%.42s", it->valuestring);
-        a_text(8, 60 + i * 18, 1, b);
-        a_text(0, 60 + i * 18, 1, "*");
-    }
-}
-
 
 /* tout ce qu'on lit sur la carte pour l'appli INFOS */
 static void monde_maj_info(monde_info_t *mi)
@@ -2329,67 +1703,6 @@ static void radio_change(int d)
 }
 
 
-static void draw_app_radio(void)
-{
-    char b[48];
-    app_titre("RADIO");
-    if (radios_n <= 0) {
-        texte_grand(40, 2, "AUCUNE STATION. ECRIS LES DANS RADIOS.TXT SUR LA CARTE.", 6);
-        return;
-    }
-    snprintf(b, sizeof(b), "%d/%d", radio_sel + 1, radios_n);
-    a_text(6, 34, 2, b);
-    texte_grand(44, 3, radios_nom[radio_sel], 2);          /* le nom, en gros */
-
-    /* l'etat, dans un cadre ovale */
-    a_ering(100, 122, 58, 22, 3, 1);
-    if (radio_etat == 0) {
-        a_text_c(100, 116, 2, "A L ARRET");
-        a_text_c(100, 150, 1, "APPUI LONG 1 = JOUER");
-    } else if (radio_etat == 1) {
-        a_text_c(100, 116, 2, "JE CHARGE...");
-        a_text_c(100, 150, 1, "JE ME CONNECTE AU WIFI");
-    } else {
-        a_text_c(100, 116, 2, "EN LECTURE");
-        a_text_c(100, 150, 1, "CA JOUE");
-        for (int i = 0; i < 5; i++)                        /* petites ondes qui bougent */
-            a_vline(84 + i * 8, 152 - (i % 3) * 4, 158 + (i % 3) * 4, 3);
-    }
-
-    /* le volume, en gros : une barre de dix morceaux */
-    {
-        int pleins = (radio_vol + 5) / 10;
-        char vb[24];
-        a_text(6, 166, 1, "VOLUME");
-        for (int i = 0; i < 10; i++) {
-            int x = 54 + i * 12, y = 164;
-            if (i < pleins) {
-                for (int a = 0; a < 11; a++) for (int bb = 0; bb < 11; bb++) a_px(x + a, y + bb, 1);
-            } else {
-                for (int a = 0; a < 11; a++) { a_px(x + a, y, 1); a_px(x + a, y + 10, 1); }
-                for (int bb = 0; bb < 11; bb++) { a_px(x, y + bb, 1); a_px(x + 10, y + bb, 1); }
-            }
-        }
-        snprintf(vb, sizeof(vb), "%d", radio_vol);
-        a_text(178, 166, 1, vb);
-    }
-    if (radio_etat == 2)
-        a_text_c(100, 182, 1, "COURT 1 = PLUS FORT   COURT 2 = MOINS FORT");
-    else
-        a_text_c(100, 182, 1, "COURT 1 = STATION SUIV.   COURT 2 = PRECED.");
-    /* le minuteur : quand il arrive a zero, FG Radio se met en route */
-    if (min_fin_us != 0) {
-        int r = minuteur_restant_s();
-        snprintf(b, sizeof(b), "MINUTEUR %d:%02d PUIS FG RADIO", r / 60, r % 60);
-        a_text_c(100, 192, 1, b);
-    } else if (radio_etat == 0) {
-        a_text_c(100, 192, 1, "COURT 1 = DEMARRE    COURT 2 = STATION -");
-        a_text_c(100, 182, 1, "LONG 1 = JOUER     LONG 2 = SUIVANTE");
-    }
-}
-
-
-
 static char journal_lignes[12][64];
 static int  journal_n = 0, journal_tete = 0;
 
@@ -2418,55 +1731,6 @@ static void journal_ajoute(const char *texte)
     }
 }
 
-static void draw_page_journal(void)
-{
-    a_text_c(100, 30, 2, "MON JOURNAL");
-    for (int i = 0; i < journal_n && i < 12; i++)
-        a_text(6, 48 + i * 12, 1, journal_lignes[(journal_tete + 12 - journal_n + i) % 12]);
-}
-
-static void draw_page_clock(void)
-{
-    time_t now = time(NULL);
-    struct tm ti;
-    localtime_r(&now, &ti);
-    int s = 9, y = 48;
-    int w = 2 * 4 * s - s + 4 * s + 2 * 4 * s - s;
-    int x = (200 - w) / 2;
-    x += draw_num(x, y, s, ti.tm_hour, 2) + 3 * s / 2;
-    sq(x, y + 2 * s, 2 * s); sq(x, y + 5 * s, 2 * s);
-    x += 4 * s;
-    draw_num(x, y, s, ti.tm_min, 2);
-
-    int ys = 156, ss = 4;
-    int dx = 22;
-    dx += draw_num(dx, ys, ss, ti.tm_mday, 2) + 3;
-    seg(dx + 2, ys + 3 * ss, dx + 5 * ss - 2, ys, 1); dx += 5 * ss;
-    dx += draw_num(dx, ys, ss, ti.tm_mon + 1, 2) + 3;
-    seg(dx + 2, ys + 3 * ss, dx + 5 * ss - 2, ys, 1); dx += 5 * ss;
-    draw_num(dx, ys, ss, (ti.tm_year + 1900) % 100, 2);
-}
-
-static void draw_page_info(void)
-{
-    int t10 = (int)lroundf(ui_temp * 10.0f);
-    int s = 8, x = 18, y = 52;
-    x += draw_num(x, y, s, t10 / 10, 2) + s;
-    disc(x + 2, y + 5 * s - s, s / 2 + 1, 1);
-    x += 2 * s;
-    x += draw_num(x, y + s, s - 3, t10 % 10 < 0 ? -t10 % 10 : t10 % 10, 1) + s;
-    ring(x + s, y + s, s, 2, 1);
-    g3x5(x + 3 * s, y, s, GC5);
-
-    int hs = 5, hx = 52, hy = 150;
-    hx += draw_num(hx, hy, hs, (int)lroundf(ui_humi), 2) + hs;
-    g3x5(hx, hy, hs, GP5);
-    if (!ui_shtc_ok) {
-        seg(150, 140, 185, 190, 2);
-        seg(185, 140, 150, 190, 2);
-    }
-}
-
 typedef struct { int x0, y0, x1, y1; } ui_btn_t;
 static const ui_btn_t BTN[4] = {
     { 10,  34,  95, 112},
@@ -2474,33 +1738,6 @@ static const ui_btn_t BTN[4] = {
     { 10, 118,  95, 196},
     {105, 118, 190, 196},
 };
-
-static void box_draw(const ui_btn_t *b)
-{
-    for (int x = b->x0; x <= b->x1; x++) {
-        px(x, b->y0, 1); px(x, b->y0 + 1, 1);
-        px(x, b->y1, 1); px(x, b->y1 - 1, 1);
-    }
-    for (int y = b->y0; y <= b->y1; y++) {
-        px(b->x0, y, 1); px(b->x0 + 1, y, 1);
-        px(b->x1, y, 1); px(b->x1 - 1, y, 1);
-    }
-}
-
-static void draw_page_set(void)
-{
-    for (int i = 0; i < 4; i++) {
-        const ui_btn_t *b = &BTN[i];
-        box_draw(b);
-        int cx = (b->x0 + b->x1) / 2, cy = (b->y0 + b->y1) / 2 + 4;
-        switch (i) {
-        case 0: icon_pig_small(cx, cy); break;
-        case 1: icon_speaker(cx, cy); break;
-        case 2: icon_wifi(cx, cy, ui_wifi_ok ? 1 : 0); break;
-        case 3: icon_power(cx, cy, 11); break;
-        }
-    }
-}
 
 /* ================================================================== */
 /* PAGE SYSTEM : le mini btop (cpu, ram, gpu, watts, batterie,        */
@@ -2658,13 +1895,6 @@ static void sys_barre(int x, int y, int w, int h, int pct)
         for (int i = 1; i <= f; i++) a_px(x + 1 + i, y + j, 1);
 }
 
-static void sys_ko(char *b, size_t n, uint32_t ko)
-{
-    if (ko >= 1024) snprintf(b, n, "%.1f MO", ko / 1024.0);
-    else            snprintf(b, n, "%u KO", (unsigned)ko);
-}
-
-
 /* acces au wifi et au scan, definis plus bas (section WiFi) */
 static const char *wifi_ssid_i(int i);
 static void wifi_secours(void);
@@ -2672,44 +1902,11 @@ static void wifi_retour_principal(void);
 static EventGroupHandle_t wifi_eg;
 #define WIFI_OK_BIT BIT0
 static void time_sync(void);
-static bool reg_valide(void);
-static bool reg_scan_encours(void);
-static int  reg_scan_n(void);
-static const char *reg_scan_ssid(int i);
-static int  reg_scan_rssi(int i);
-static int  reg_scan_auth(int i);
 
 /* ------------------------------------------------------------------ */
 /* Page REGLAGES : wifi (liste + clavier), ecran, infos                */
 /* ------------------------------------------------------------------ */
-#define REG_MENU    0
-#define REG_WIFI    1
-#define REG_CLAVIER 2
-
-static int reg_vue = REG_MENU;
-static int reg_ligne = 0;
-static int reg_sel = 0;
-static int  reg_page_k = 0;
-static uint8_t reg_auth = 0;        /* 0 = reseau ouvert, sinon il faut un mot de passe */
-static char reg_ssid[33] = "";
-static char reg_pass[65] = "";
-static int  reg_cadence = 5;      /* secondes entre deux images (page systeme) */
-
-static const char *K_LETTRES[] = {"a","b","c","d","e","f","g","h","i","j","k","l",
-                                  "m","n","o","p","q","r","s","t","u","v","w","x",
-                                  "y","z","ESP","EFF","OK","123"};
-static const char *K_SIGNES[]  = {"0","1","2","3","4","5","6","7","8","9",
-                                  ".","-","_","@",":","/","#","?","!","&",
-                                  "ESP","EFF","OK","abc"};
-#define K_LETTRES_N ((int)(sizeof(K_LETTRES) / sizeof(K_LETTRES[0])))
-#define K_SIGNES_N  ((int)(sizeof(K_SIGNES) / sizeof(K_SIGNES[0])))
-
-static int reg_touches_n(void) { return reg_page_k ? K_SIGNES_N : K_LETTRES_N; }
-static const char *reg_touche(int i)
-{
-    if (reg_page_k) return (i < K_SIGNES_N) ? K_SIGNES[i] : "";
-    return (i < K_LETTRES_N) ? K_LETTRES[i] : "";
-}
+static int  reg_cadence = 5;      /* secondes entre deux images (ancienne page systeme) */
 
 static const char *ip_courante(void)
 {
@@ -2721,228 +1918,6 @@ static const char *ip_courante(void)
     else
         snprintf(ip, sizeof(ip), "192.168.8.210");
     return ip;
-}
-
-static void reg_rect(int x, int y, int w, int h, int black)
-{
-    for (int j = 0; j < h; j++)
-        for (int i = 0; i < w; i++)
-            a_px(x + i, y + j, black);
-}
-
-static void reg_tronque(char *d, size_t n, const char *s)
-{
-    snprintf(d, n, "%s", s ? s : "");
-}
-
-static void draw_app_reglages(void)
-{
-    char b[64], v[48];
-
-    if (reg_vue == REG_MENU) {
-        a_text(6, 2, 3, "REGLAGES");
-        a_hline(4, 195, 19, 1);
-        const char *nom[3] = {"WIFI", "ECRAN", "INFOS"};
-        for (int i = 0; i < 3; i++) {
-            int y = 28 + i * 30;
-            snprintf(v, sizeof(v), "%s", nom[i]);
-            if (i == reg_ligne) {
-                reg_rect(4, y - 5, 192, 22, 1);
-                a_text_col(10, y, 3, v, 0);
-            } else {
-                a_text(10, y, 3, v);
-            }
-            const char *d = "";
-            if (i == 0) d = wifi_ssid_i(0);
-            /* le chiffre seul : dans cette police le S ressemble a un 5 */
-            else if (i == 1) { static char c[16]; snprintf(c, sizeof(c), "%d", reg_cadence); d = c; }
-            else d = "v1.0";
-            if (d && d[0]) {
-                int w = a_text_w(2, d);
-                if (w > 110) { char t[24]; snprintf(t, sizeof(t), "%.12s", d); d = t; w = a_text_w(2, d); }
-                if (i == reg_ligne) a_text_col(194 - w, y + 3, 2, d, 0);
-                else                a_text(194 - w, y + 3, 2, d);
-            }
-        }
-        a_hline(4, 195, 128, 1);
-        a_text_c(100, 134, 2, "1 = SUIVANT");
-        a_text_c(100, 150, 2, "2 = CHOISIR");
-        a_text_c(100, 166, 2, "2 LONG = SORTIR");
-        snprintf(b, sizeof(b), "http://%s/reglages", ip_courante());
-        a_text_c(100, 182, 1, b);
-        a_text_c(100, 191, 1, "en http, pas https");
-        return;
-    }
-
-    if (reg_vue == REG_WIFI) {
-        a_text(6, 2, 2, "RESEAUX");
-        if (reg_scan_encours()) a_text(120, 2, 2, "scan...");
-        a_hline(4, 195, 15, 1);
-        if (!reg_scan_n()) {
-            a_text_c(100, 80, 2, "aucun reseau");
-            a_text_c(100, 100, 2, "relancer le scan ?");
-        }
-        int premier = reg_sel > 4 ? reg_sel - 4 : 0;
-        for (int k = 0; k < 5 && premier + k < reg_scan_n(); k++) {
-            int i = premier + k;
-            int y = 20 + k * 26;
-            snprintf(b, sizeof(b), "%s", reg_scan_ssid(i));
-            snprintf(v, sizeof(v), "%d", reg_scan_rssi(i));
-            if (i == reg_sel) {
-                reg_rect(4, y - 3, 192, 22, 1);
-                a_text_col(10, y, 2, b, 0);
-                a_text_col(194 - a_text_w(2, v), y, 2, v, 0);
-            } else {
-                a_text(10, y, 2, b);
-                a_text(194 - a_text_w(2, v), y, 2, v);
-            }
-        }
-        a_hline(4, 195, 156, 1);
-        a_text_c(100, 162, 2, "1: suivant   2: choisir");
-        a_text_c(100, 178, 2, "2 long : retour");
-        return;
-    }
-
-    /* --- clavier --- */
-    a_text(4, 2, 2, reg_ssid[0] ? reg_ssid : "reseau");
-    if (!reg_valide()) a_text(194 - a_text_w(1, "MDP REQUIS"), 14, 1, "MDP REQUIS");
-    /* le mot de passe en clair : il est seul devant son robot */
-    {
-        char p[24];
-        snprintf(p, sizeof(p), "%.21s", reg_pass);
-        a_text(4, 13, 2, p);
-        int w = a_text_w(2, p);
-        if (strlen(reg_pass) < 21) a_hline(4 + w + 2, 4 + w + 8, 20, 1);  /* curseur */
-    }
-    a_hline(4, 195, 25, 1);
-    {
-        int n = reg_touches_n();
-        for (int i = 0; i < n; i++) {
-            int col = i % 6, row = i / 6;
-            int x = 4 + col * 32, y = 28 + row * 31;
-            reg_rect(x, y, 31, 29, 0);            /* fond blanc */
-            a_hline(x, x + 30, y, 1);
-            a_hline(x, x + 30, y + 28, 1);
-            a_vline(x, y, y + 28, 1);
-            a_vline(x + 30, y, y + 28, 1);
-            if (i == reg_sel) reg_rect(x + 1, y + 1, 29, 27, 1);  /* selection noire */
-            const char *t = reg_touche(i);
-            int w = a_text_w(2, t);
-            int tx = x + (31 - w) / 2;
-            if (i == reg_sel) a_text_col(tx, y + 10, 2, t, 0);
-            else              a_text(tx, y + 10, 2, t);
-        }
-    }
-    a_hline(4, 195, 182, 1);
-    a_text_c(100, 185, 1, "1 SUIVANT   2 TAPER   1 LONG EFFACER");
-    a_text_c(100, 193, 1, "2 LONG VALIDER   2 DOUBLE QUITTER");
-}
-
-static void draw_app_sys(void)
-{
-    char b[64], v[80];
-    int pct;
-
-    /* ---- en-tete : la borne wifi a droite (l'accueil n'a plus cette info) ---- */
-    a_text(6, 2, 3, "SYSTEM");
-    {
-        const char *w = wifi_actif[0] ? wifi_actif : "HORS LIGNE";
-        a_text(194 - a_text_w(2, w), 6, 2, w);
-    }
-    a_hline(4, 195, 19, 1);
-
-    /* ---- CPU : le gros chiffre d'abord, c'est ce qu'on lit de loin ---- */
-    a_text(6, 24, 2, "CPU");
-    snprintf(v, sizeof(v), "%d.%d%%", sys_cpu10 / 10, sys_cpu10 % 10);
-    a_text(40, 19, 4, v);
-    snprintf(b, sizeof(b), "%dMHZ", (int)(esp_clk_cpu_freq() / 1000000));
-    a_text(194 - a_text_w(2, b), 24, 2, b);
-
-    /* le graphe, 38 colonnes de 4 px sur 28 px de haut */
-    {
-        int x0 = 4, y0 = 44, h = 28;
-        for (int i = 0; i < SYS_HIST; i++) {
-            int val = 0;
-            if (i < sys_hist_n) {
-                int idx = (sys_hist_tete - sys_hist_n + i + SYS_HIST) % SYS_HIST;
-                val = sys_hist[idx];
-            }
-            int hb = val * (h - 1) / 100;
-            for (int yy = 0; yy <= hb; yy++)
-                for (int xx = 0; xx < 4; xx++)
-                    a_px(x0 + i * 5 + xx, y0 + h - 1 - yy, 1);
-        }
-        a_hline(x0, x0 + SYS_HIST * 5 - 2, y0 + h, 1);
-    }
-    a_hline(4, 195, 74, 1);
-
-    /* ---- RAM interne ---- */
-    {
-        int lib = (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        int tot = (int)heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
-        pct = tot > 0 ? (tot - lib) * 100 / tot : 0;
-        a_text(6, 79, 2, "RAM");
-        snprintf(v, sizeof(v), "%uK/%uK", (unsigned)(lib / 1024), (unsigned)(tot / 1024));
-        a_text(194 - a_text_w(2, v), 79, 2, v);
-        sys_barre(4, 92, 192, 8, pct);
-    }
-
-    /* ---- PSRAM ---- */
-    {
-        int lib = (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-        int tot = (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-        pct = tot > 0 ? (tot - lib) * 100 / tot : 0;
-        a_text(6, 104, 2, "PSRAM");
-        snprintf(v, sizeof(v), "%.1fM/%.0fM", lib / 1048576.0, tot / 1048576.0);
-        a_text(194 - a_text_w(2, v), 104, 2, v);
-        sys_barre(4, 117, 192, 8, pct);
-    }
-
-    /* ---- watts et batterie, en gros ---- */
-    {
-        snprintf(v, sizeof(v), "%.2fW", conso_mw() / 1000.0);
-        a_text(6, 130, 3, v);
-        int mv = sys_bat_mv();
-        int bp = sys_bat_pct(mv);
-        sys_bat_mv_cache = mv;
-        sys_bat_pct_cache = bp;
-        snprintf(v, sizeof(v), "%s", bp < 0 ? "USB" : "");
-        if (bp >= 0) snprintf(v, sizeof(v), "BAT %d%%", bp);
-        a_text(194 - a_text_w(3, v), 130, 3, v);
-        if (bp >= 0) sys_barre(4, 149, 192, 8, bp);
-    }
-
-    /* ---- reseau ---- */
-    a_text(6, 161, 2, "NET");
-    snprintf(v, sizeof(v), "V%dK ^%dK", sys_rx_s / 1024, sys_tx_s / 1024);
-    a_text(194 - a_text_w(2, v), 161, 2, v);
-
-    /* ---- stockage : la carte SD et la flash interne, cote a cote ---- */
-    {
-        uint64_t tot = 0, lib = 0;
-        size_t st = 0, su = 0;
-        int sd_p = -1, fl_p = -1;
-
-        if (sd_ok && esp_vfs_fat_info("/sdcard", &tot, &lib) == ESP_OK && tot) {
-            sd_p = (int)((tot - lib) * 100 / tot);
-            snprintf(v, sizeof(v), "SD %d/%dG", (int)((tot - lib) / 1073741824ULL),
-                     (int)(tot / 1073741824ULL));
-        } else {
-            snprintf(v, sizeof(v), "SD -");
-        }
-        a_text(6, 174, 2, v);
-
-        if (esp_spiffs_info("storage", &st, &su) == ESP_OK && st) {
-            fl_p = (int)(su * 100 / st);
-            snprintf(b, sizeof(b), "FL %u/%uK", (unsigned)(su / 1024), (unsigned)(st / 1024));
-        } else {
-            snprintf(b, sizeof(b), "FL -");
-        }
-        a_text(194 - a_text_w(2, b), 174, 2, b);
-
-        sys_barre(4, 187, 92, 8, sd_p < 0 ? 0 : sd_p);
-        sys_barre(104, 187, 92, 8, fl_p < 0 ? 0 : fl_p);
-    }
 }
 
 static int last_drawn_page = -1;      /* pour forcer un refresh complet au changement de page */
@@ -3078,20 +2053,6 @@ static void livre_arret(void)
     livre_pret = false;
 }
 
-static void draw_app_livre(void)
-{
-    if (livre_pret) { livre_dessine(&livre); return; }
-
-    a_text(6, 2, 3, "LIVRES");
-    a_hline(4, 195, 19, 1);
-    if (livre_n == 0)
-        texte_grand(40, 2, "AUCUN LIVRE. POSER DES FICHIERS TXT DANS LE DOSSIER LIVRES DE LA CARTE.", 8);
-    else
-        texte_grand(40, 2, "LE LIVRE N A PAS PU ETRE OUVERT. VERIFIER LA CARTE.", 5);
-    a_text_c(100, 186, 1, "OU /LIVRE?OP=LISTE");
-}
-
-
 /* ================================================================== */
 /* LE LAUNCHER : la grille des applis                                  */
 /* ================================================================== */
@@ -3101,41 +2062,8 @@ static void draw_app_livre(void)
    retour a l'accueil par un appui long. Elle ne fait pas partie du cycle
    (comme REGLAGES) : on y entre par le DOUBLE APPUI DU BOUTON 2. */
 
-#define LANC_N 8
+/* le launcher a disparu avec les pages (11/11) */
 
-static int lanc_sel = 0;
-
-static const char *LANC_NOM[LANC_N] = { "ACCUEIL", "METEO", "SYSTEM", "HISTO",
-                                        "YOUTUBE", "CONSEIL", "MATRIX", "LIVRE" };
-static const char *LANC_SUB[LANC_N] = { "HEURE", "CIEL", "BENCH", "JOURNAL",
-                                        "CHAINE", "AVIS", "SCAN", "LECTEUR" };
-static const int   LANC_PAGE[LANC_N] = { PAGE_MAITRE, PAGE_METEO, PAGE_SYS, PAGE_HIST,
-                                        PAGE_YT, PAGE_CONSEIL, PAGE_MATRIX, PAGE_LIVRE };
-
-static void draw_app_lanc(void)
-{
-    a_text(4, 2, 2, "APPLIS");
-    a_text(196 - a_text_w(1, "1=SUIV 2=OUVRIR"), 6, 1, "1=SUIV 2=OUVRIR");
-    a_hline(0, 199, 18, 1);
-
-    for (int i = 0; i < LANC_N; i++) {
-        int col = i % 2, row = i / 2;
-        int x = 4 + col * 98, y = 22 + row * 44, w = 94, h = 40;
-        for (int xx = x; xx < x + w; xx++) { a_px(xx, y, 1); a_px(xx, y + h - 1, 1); }
-        for (int yy = y; yy < y + h; yy++) { a_px(x, yy, 1); a_px(x + w - 1, yy, 1); }
-        if (i == lanc_sel) {
-            /* la tuile choisie : plein noir, texte blanc — le seul aplat de la
-               page, il se lit de loin */
-            for (int yy = y + 1; yy < y + h - 1; yy++)
-                for (int xx = x + 1; xx < x + w - 1; xx++) a_px(xx, yy, 1);
-            a_text_col(x + 8, y + 6, 2, LANC_NOM[i], 0);
-            a_text_col(x + 8, y + 26, 1, LANC_SUB[i], 0);
-        } else {
-            a_text(x + 8, y + 6, 2, LANC_NOM[i]);
-            a_text(x + 8, y + 26, 1, LANC_SUB[i]);
-        }
-    }
-}
 
 /* ================================================================== */
 /* 8. MATRIX : l'analyse du systeme, en pluie de code                  */
@@ -3176,25 +2104,6 @@ static uint32_t mtx_rand(uint32_t *s)
 /* le fond noir : la pluie est en video inversee. Attention a la convention du
    framebuffer : 1 = pixel noir (a_px(..., 1)), 0 = blanc. Un a_px(x, y, 0)
    laisse donc la page blanche, ce qui a donne une premiere version vide. */
-static void mtx_noir(void)
-{
-    for (int y = 0; y < 200; y++)
-        for (int x = 0; x < 200; x++)
-            a_px(x, y, 1);
-}
-
-/* une barre blanche (sur fond noir), meme trace que sys_barre */
-static void mtx_barre(int x, int y, int w, int h, int pct)
-{
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    for (int i = 0; i < w; i++) { a_px(x + i, y, 0); a_px(x + i, y + h - 1, 0); }
-    for (int j = 0; j < h; j++) { a_px(x, y + j, 0); a_px(x + w - 1, y + j, 0); }
-    int f = (w - 4) * pct / 100;
-    for (int j = 1; j < h - 1; j++)
-        for (int i = 1; i <= f; i++) a_px(x + 1 + i, y + j, 0);
-}
-
 /* une colonne de pluie : un fil vertical continu (le 1 bit n'a pas de gris,
    c'est le fil qui donne la densite) et des glyphes tous les 6 px dessus. La
    tete est un bloc plein 3x5. Rien ne sort de la bande MTX_Y0..MTX_Y1 : sans
@@ -3202,179 +2111,14 @@ static void mtx_barre(int x, int y, int w, int h, int pct)
 #define MTX_Y0  22
 #define MTX_Y1  166
 
-static void mtx_colonne(int c, int tete, int etape)
-{
-    char g[2] = { 0, 0 };
-    uint32_t s = mtx_graine ^ (uint32_t)(c * 2654435761u) ^ (uint32_t)(etape * 40503u);
-    int x = 2 + c * MTX_CW;
-    int queue = 34 + MTX_VITESSE[c] * 5;          /* longueur du fil, en pixels */
-    int y_bas = tete - queue;
-    if (y_bas < MTX_Y0) y_bas = MTX_Y0;
-
-    /* la tete : un glyphe plein, c'est le point le plus lumineux de la colonne */
-    for (int j = 0; j < 5; j++)
-        for (int i = 0; i < 3; i++)
-            if (tete + j >= MTX_Y0 && tete + j <= MTX_Y1) a_px(x + i, tete + j, 0);
-
-    /* le fil : 1 px de large, il ne s'arrete jamais avant la tete */
-    for (int y = y_bas; y < tete; y++)
-        if (y >= MTX_Y0 && y <= MTX_Y1) a_px(x + 1, y, 0);
-
-    /* les glyphes : un tous les 6 px, jamais sur la tete */
-    for (int y = tete - 6; y >= y_bas; y -= 6) {
-        if (y < MTX_Y0 || y > MTX_Y1 - 5) continue;
-        g[0] = MTX_GLYPH[mtx_rand(&s) % MTX_NGLYPH];
-        a_text_col(x, y, 1, g, 0);
-    }
-}
-
-/* les quatre images de la pluie */
-static void mtx_dessine_pluie(void)
-{
-    /* avancement en pixels : la pluie descend d'une image a l'autre */
-    static const int PROG[MTX_ETAPES] = { 46, 104, 152, 196 };
-    static const char *TITRE[MTX_ETAPES] = { "CONNEXION", "LECTURE CPU", 
-                                             "MEMOIRE + CARTE", "RESEAU + IA" };
-    int prog = PROG[mtx_etape < MTX_ETAPES ? mtx_etape : MTX_ETAPES - 1];
-
-    mtx_noir();
-
-    for (int c = 0; c < MTX_COLS; c++) {
-        /* la tete tombe dans la bande et y revient par le haut : pas de colonne
-           vide, et pas de glyphe sur le titre ou sur la barre */
-        int tete = MTX_Y0 + (int)(((long)prog * MTX_VITESSE[c] / 10 + c * 53)
-                                  % (MTX_Y1 - MTX_Y0 - 8));
-        mtx_colonne(c, tete, mtx_etape);
-    }
-
-    /* la ligne de balayage : ce que le robot est en train de lire */
-    {
-        int y = 24 + (prog * 132 / 200);
-        if (y < 184) {
-            for (int x = 0; x < 200; x += 3) { a_px(x, y, 0); a_px(x + 1, y, 0); }
-        }
-    }
-
-    /* l'en-tete est dessine APRES la pluie : sinon une colonne passe dessus et
-       le titre devient illisible (vu sur la premiere version) */
-    {
-        for (int x = 0; x < 200; x++) for (int y = 0; y < 15; y++) a_px(x, y, 1);
-        a_text_col(4, 3, 2, "MATRIX", 0);
-        {
-            char b[28];
-            snprintf(b, sizeof(b), "%d/%d", mtx_etape + 1, MTX_ETAPES);
-            a_text_col(196 - a_text_w(1, b), 6, 1, b, 0);
-        }
-    }
-
-    /* bas d'ecran : l'etape, le pourcentage, la barre */
-    a_text_col(4, 174, 1, TITRE[mtx_etape < MTX_ETAPES ? mtx_etape : 0], 0);
-    {
-        char b[8];
-        snprintf(b, sizeof(b), "%d%%", (mtx_etape + 1) * 100 / MTX_ETAPES);
-        a_text_col(196 - a_text_w(1, b), 174, 1, b, 0);
-    }
-    mtx_barre(4, 184, 192, 7, (mtx_etape + 1) * 100 / MTX_ETAPES);
-    a_text_col(4, 194, 1, "1 LONG = RELANCER  2 LONG = ACCUEIL", 0);
-}
-
-/* le rapport : ce que l'analyse a trouve, en clair */
-static void mtx_dessine_rapport(void)
-{
-    char v[32], alerte[40];
-    int rssi = 0;
-    bool wifi_ok = false;
-    int lib_int = (int)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
-    int tot_int = (int)(heap_caps_get_total_size(MALLOC_CAP_INTERNAL) / 1024);
-    int lib_ps  = (int)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1048576);
-    int mv = sys_bat_mv();
-    int bp = sys_bat_pct(mv);
-    long up = (long)(esp_timer_get_time() / 1000000);
-
-    {
-        wifi_ap_record_t ap = {};
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) { rssi = ap.rssi; wifi_ok = true; }
-    }
-
-    /* alertes : l'ordre compte, la premiere trouvee est celle qu'on affiche */
-    alerte[0] = 0;
-    if (bp >= 0 && bp < 15)                       snprintf(alerte, sizeof(alerte), "BATTERIE %d%%", bp);
-    else if (!wifi_ok)                            snprintf(alerte, sizeof(alerte), "RESEAU PERDU");
-    else if (!sd_ok)                              snprintf(alerte, sizeof(alerte), "CARTE SD ABSENTE");
-    else if (lib_int < 40)                        snprintf(alerte, sizeof(alerte), "RAM BASSE %dK", lib_int);
-    else if (rssi < -78)                          snprintf(alerte, sizeof(alerte), "SIGNAL FAIBLE");
-
-    /* bandeau noir, marque en blanc : le seul aplat noir de la page, il donne
-       le contraste sans transformer l'ecran en fantome */
-    a_hline(0, 199, 0, 16);
-    a_text_col(6, 3, 2, "MATRIX", 0);
-    a_text_col(196 - a_text_w(1, "RAPPORT"), 6, 1, "RAPPORT", 0);
-
-    /* les lignes de mesure : libelle a gauche, valeur a droite */
-    {
-        int y = 26;
-        snprintf(v, sizeof(v), "%d.%d%% %dMHZ", sys_cpu10 / 10, sys_cpu10 % 10,
-                 (int)(esp_clk_cpu_freq() / 1000000));
-        a_text(6, y, 2, "CPU");     a_text(194 - a_text_w(2, v), y, 2, v);
-
-        y += 20;
-        snprintf(v, sizeof(v), "%dK/%dK", lib_int, tot_int);
-        a_text(6, y, 2, "RAM");     a_text(194 - a_text_w(2, v), y, 2, v);
-
-        y += 20;
-        snprintf(v, sizeof(v), "%dM/8M", lib_ps);
-        a_text(6, y, 2, "PSRAM");   a_text(194 - a_text_w(2, v), y, 2, v);
-
-        y += 20;
-        if (sd_ok) snprintf(v, sizeof(v), "%d TOURS", hist_sd_n);
-        else       snprintf(v, sizeof(v), "ABSENTE");
-        a_text(6, y, 2, "CARTE");   a_text(194 - a_text_w(2, v), y, 2, v);
-
-        y += 20;
-        if (wifi_ok) snprintf(v, sizeof(v), "%dDBM", rssi);
-        else         snprintf(v, sizeof(v), "HORS LIGNE");
-        a_text(6, y, 2, "WIFI");    a_text(194 - a_text_w(2, v), y, 2, v);
-
-        y += 20;
-        if (bp >= 0) snprintf(v, sizeof(v), "%d%% %dMV", bp, mv);
-        else         snprintf(v, sizeof(v), "USB");
-        a_text(6, y, 2, "BAT");     a_text(194 - a_text_w(2, v), y, 2, v);
-
-        y += 20;
-        snprintf(v, sizeof(v), "%.14s", ia_mod);
-        a_text(6, y, 2, "IA");      a_text(194 - a_text_w(2, v), y, 2, v);
-    }
-
-    /* verdict */
-    a_hline(4, 195, 158, 1);
-    if (alerte[0]) {
-        a_text(6, 164, 2, "ATTENTION");
-        a_text(194 - a_text_w(2, alerte), 164, 2, alerte);
-    } else {
-        a_text(6, 164, 2, "SYSTEME STABLE");
-        {
-            char b[16];
-            if (up >= 3600) snprintf(b, sizeof(b), "%ldH%02ld", up / 3600, (up % 3600) / 60);
-            else            snprintf(b, sizeof(b), "%ld MIN", up / 60);
-            a_text(194 - a_text_w(2, b), 164, 2, b);
-        }
-    }
-    a_text_c(100, 186, 1, "1 LONG = RELANCER   2 LONG = ACCUEIL");
-}
-
-static void draw_app_matrix(void)
-{
-    if (mtx_etape >= MTX_ETAPES) mtx_dessine_rapport();
-    else                         mtx_dessine_pluie();
-}
-
 /* la sequence avance au rythme de la tache de fond (700 ms) : une image toutes
    les 2,4 s. La dalle met deja ~1 s a se rafraichir et clignote a chaque
    image ; plus vite, c'est un stroboscope, pas une animation. */
 static void mtx_tick(void)
 {
     if (!mtx_anim) return;
-    if (ui_page != PAGE_MATRIX) { mtx_anim = false; return; }
+    mtx_anim = false;               /* la page MATRIX n'existe plus */
+    return;
     int64_t t = esp_timer_get_time() / 1000;
     if (mtx_dernier_ms && t - mtx_dernier_ms < 2400) return;
     mtx_dernier_ms = t;
@@ -3476,13 +2220,11 @@ static void tableau_maitre(void)
     }
 
     /* ---- energie ---- */
-    t.bat_pct  = sys_bat_pct(sys_bat_mv());        /* -1 : USB, pas de batterie */
-    t.conso_mw = conso_mw();
+    t.bat_pct = sys_bat_pct(sys_bat_mv());         /* -1 : USB, pas de batterie */
 
     /* ---- capteur interne (SHTC3) ---- */
-    t.capteur = ui_shtc_ok;
+    t.capteur  = ui_shtc_ok;
     t.temp_int = ui_temp;
-    t.humi     = ui_humi;
 
     /* ---- meteo ---- */
     t.meteo   = meteo_ok;
@@ -3493,17 +2235,9 @@ static void tableau_maitre(void)
     t.dem_max = (int)meteo_dem_max;
     t.dem_pluie = (meteo_dem_code >= 0) ? meteo_dem_pluie : -1;
 
-    /* ---- compagnon : sous verrou, c'est la tache tamagotchi qui le fait vivre ---- */
-    if (pet_mux && xSemaphoreTake(pet_mux, pdMS_TO_TICKS(300)) == pdTRUE) {
-        t.faim    = pet.faim / 4;          /* 400 points = 4 coeurs = 100 % */
-        t.bonheur = pet.bonheur / 4;
-        t.energie = pet.energie / 4;
-        t.sante   = pet_sante(&pet);
-        xSemaphoreGive(pet_mux);
-    } else {                               /* verrou occupe : on dit N.D., jamais zero */
-        t.faim = t.bonheur = t.energie = t.sante = -1;
-    }
-    t.visage = kirby_etat();
+    /* le compagnon n'est plus dessine : ses jauges ont quitte l'ecran le
+       11/11 (le moteur tamagotchi tourne toujours, il nourrit l'emotion et
+       le contexte de l'assistant). */
 
     /* ---- agenda : le prochain rendez-vous, sinon les minuteurs ---- */
     if (ms_debut > 0 && ms_titre[0]) {
@@ -3527,15 +2261,6 @@ static void tableau_maitre(void)
         t.rappels = actifs;
     }
 
-    /* ---- ce qu'il a dit en dernier (le dernier tour de MINO) ---- */
-    if (hist_p) {
-        for (int i = hist.n - 1; i >= 0; i--)
-            if (hist_est_mino(hist_p, i)) {
-                snprintf(t.dernier, sizeof(t.dernier), "%.*s", (int)sizeof(t.dernier) - 1,
-                         hist_p->txt[i]);
-                break;
-            }
-    }
     /* youtube et le livre ont ete retires de la page le 11/11 : leurs
        donnees restent dans le firmware (routes /livre, /state) mais ne sont
        plus collectees pour le tableau. */
@@ -3549,7 +2274,6 @@ static void show_ui(void)
 {
     bool plein;
     bool pris = false;
-    appli_suivre_page();      /* entre/sortie d'appli : tue l'appli quittee */
     if (ui_mux) pris = (xSemaphoreTake(ui_mux, pdMS_TO_TICKS(3000)) == pdTRUE);
     if (!pris && ui_mux) { redraw_demande = true; return; }   /* un autre dessin est en cours : on reessaie */
     fb_clear();
@@ -3566,25 +2290,11 @@ static void show_ui(void)
         plein = (last_drawn_page != -2);
         last_drawn_page = -2;
     } else {
+        /* une seule page : le tableau, et rien d'autre */
         fb_oy = 0;
-        switch (ui_page) {
-        case PAGE_MAITRE:  anim_ph++; draw_app_maitre();  break;
-        case PAGE_METEO:   draw_app_meteo();  break;
-        case PAGE_SYS:     draw_app_sys();    break;
-        case PAGE_HIST:    draw_app_hist();   break;
-        case PAGE_YT:      draw_app_youtube(); break;
-        case PAGE_CONSEIL: draw_app_conseil(); break;
-        case PAGE_LIVRE:   draw_app_livre();  break;
-        case PAGE_MATRIX:  draw_app_matrix(); break;
-        case PAGE_LANC:    draw_app_lanc();   break;
-        case PAGE_REG:     draw_app_reglages(); break;
-        default:           draw_app_sys();     break;
-        }
-        plein = (ui_page != last_drawn_page) ||
-                (partiels >= (ui_page == PAGE_MAITRE ? 40 : 10));
-        /* chaque image de la sequence MATRIX passe par un refresh complet : un
-           partiel laisserait la trace de la pluie precedente (fantomes) */
-        if (ui_page == PAGE_MATRIX && mtx_anim) plein = true;
+        anim_ph++;
+        draw_app_maitre();
+        plein = (last_drawn_page != ui_page) || (partiels >= 40);
         last_drawn_page = ui_page;
     }
 
@@ -3727,28 +2437,13 @@ static void touch_handle(int sx, int sy, int ex, int ey, int ms)
     geste_ms = esp_timer_get_time() / 1000;
     ESP_LOGI(TAG, "tactile (%d,%d)->(%d,%d) %d ms", sx, sy, ex, ey, ms);
 
-    if (ms < 900 && abs(dx) > 30 && abs(dx) > abs(dy)) {
-        ui_page = (ui_page + (dx < 0 ? 1 : PAGE_COUNT - 1)) % PAGE_COUNT;
-        ESP_LOGI(TAG, "page -> %d", ui_page);
-        show_ui();
-        return;
-    }
     if (sy < 28 && sx > 160) {          /* coin haut droit : wifi on/off */
         ui_action(2);
         return;
     }
-    if (sx < 100) {          /* moitie gauche : appli precedente */
-        ui_page = (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;
-    } else {                 /* moitie droite : appli suivante */
-        ui_page = (ui_page + 1) % PAGE_COUNT;
-    }
+    /* il n'y a plus de page a faire defiler : un glissement redessine */
+    ui_read_sensors();
     show_ui();
-    return;
-    if (ui_page == 99) {
-        ui_read_sensors();
-        show_ui();
-        return;
-    }
 }
 
 static void touch_task(void *arg)
@@ -3789,22 +2484,10 @@ static void touch_task(void *arg)
  */
 static void page_next(int d)
 {
+    (void)d;
     geste_ms = esp_timer_get_time() / 1000;
-    ui_page = (ui_page + d) % PAGE_COUNT;
-    if (ui_page < 0) ui_page += PAGE_COUNT;
-    ESP_LOGI(TAG, "bouton : page %d", ui_page);
+    /* une seule page : l'ancien "page suivante" redessine le tableau */
     ui_read_sensors();
-    if (ui_page == 99) { secu_refresh(); secu_sweep(); }
-    show_ui();
-}
-
-static void pet_action_ui(pet_action_t a, const char *quoi)
-{
-    xSemaphoreTake(pet_mux, portMAX_DELAY);
-    journal_ajoute(pet_action(&pet, a));
-    xSemaphoreGive(pet_mux);
-    ESP_LOGI(TAG, "action : %s", quoi);
-    ui_beep();
     show_ui();
 }
 
@@ -3977,8 +2660,6 @@ static void tache_arrete(void)
 }
 
 
-static void reg_bouton(int n);
-static void reg_bouton_long(int n);
 
 /* ------------------------------------------------------------------------
    LE ROUTEUR DES BOUTONS : UNE TABLE PAR PAGE
@@ -4002,113 +2683,21 @@ static void reg_bouton_long(int n);
    ------------------------------------------------------------------------ */
 
 /* @@ROUTEUR_DEBUT@@ */
-typedef struct {
-    bool (*court)(int n);              /* appui court */
-    bool (*dbl)(int n);                /* double appui */
-    bool (*lng)(int n, bool tres_long);/* appui long */
-    bool (*rep)(int n);                /* maintien prolonge */
-} page_act_t;
+/* LE ROUTEUR DES BOUTONS
 
-/* ---- REGLAGES : le clavier garde ses gestes propres, sinon taper un mot de
-   passe avec deux boutons serait interminable ---- */
-static bool act_reg_court(int n) { reg_bouton(n); show_ui(); return true; }
+   Il n'y a plus qu'un ecran : la table "une ligne par page" est partie avec
+   les pages. L'ordre de priorite reste celui d'avant, et il est deliberе :
+     1. la reponse plein ecran (REPONSE) capture tout
+     2. la sonnerie s'arrete au bouton 1
+     3. une tache en cours (voix, radio, ecoute) s'arrete
+     4. sinon : bouton 1 = relire les donnees, double 1 = assistant,
+        appui long = retour au tableau
+*/
 
-static bool act_reg_dbl(int n)
+/* bouton 1 court : redemander une lecture fraiche (meteo, capteurs) */
+static bool act_tableau_court(int n)
 {
-    if (reg_vue != REG_CLAVIER) return false;
-    if (n == 0) {                       /* saute une rangee de 6 touches */
-        reg_sel = (reg_sel + 6) % reg_touches_n();
-    } else {                            /* abandonne la saisie */
-        reg_pass[0] = 0;
-        reg_vue = REG_WIFI;
-    }
-    show_ui();
-    return true;
-}
-
-static bool act_reg_lng(int n, bool tres_long)
-{
-    (void)tres_long;
-    reg_bouton_long(n);
-    show_ui();
-    return true;
-}
-
-/* ---- LIVRE : les deux boutons tournent les pages, le double 2 change de
-   livre. La dalle met ~0,9 s a passer une page : enchainer plus vite la
-   laisserait en BUSY (panne), alors on attend plutot que de perdre l'appui. ---- */
-static bool act_livre_court(int n)
-{
-    static int64_t dernier_feuillet = 0;
-    int64_t t = esp_timer_get_time() / 1000;
-    if (dernier_feuillet && t - dernier_feuillet < 1000)
-        vTaskDelay(pdMS_TO_TICKS(1000 - (t - dernier_feuillet)));
-    dernier_feuillet = esp_timer_get_time() / 1000;
-    if (!livre_pret) livre_reprise();
-    if (livre_pret) {
-        if (!livre_tourne(n == 0 ? 1 : -1)) ui_beep();   /* deja au bout */
-        show_ui();
-    } else {
-        ui_beep();
-        show_ui();
-    }
-    return true;
-}
-
-static bool act_livre_dbl(int n)
-{
-    if (n != 1) return false;           /* le double 1 reste l'assistant */
-    if (!livre_pret) livre_reprise();
-    livre_suivant(1);
-    show_ui();
-    return true;
-}
-
-static bool act_livre_rep(int n)
-{
-    if (!livre_pret) return false;
-    livre_tourne(n == 0 ? 1 : -1);
-    show_ui();
-    return true;
-}
-
-/* ---- HISTORIQUE : le long revient au plus recent ---- */
-static bool act_hist_lng(int n, bool tres_long)
-{
-    (void)n; (void)tres_long;
-    hist_vue = 0;
-    show_ui();
-    return true;
-}
-
-/* ---- CONSEIL : le long demande un nouveau jugement, et sur cette page il ne
-   ramene PAS a l'accueil (c'est son geste propre) ---- */
-static bool act_conseil_lng(int n, bool tres_long)
-{
-    (void)tres_long;
-    if (n == 0 && !conseil_occupe) { conseil_demande = true; ui_beep(); }
-    return true;
-}
-
-/* MATRIX : appui LONG 1 = rejouer la sequence d'analyse, comme CONSEIL rejuge
-   au long. L'appui court reste la navigation (sinon on ne sortait plus de la
-   page), et le long du bouton 2 rend l'accueil comme partout. */
-static bool act_matrix_lng(int n, bool tres_long)
-{
-    (void)tres_long;
-    if (n != 0) return false;
-    mtx_lance();
-    ui_beep();
-    show_ui();
-    return true;
-}
-
-/* ACCUEIL, bouton 1 court : RELIRE. Le tableau est le seul ecran, donc le
-   bouton ne tourne plus de page : il redemande les donnees (meteo, chaine
-   YouTube, capteur) et redessine. C'est le seul geste court de la page. */
-static bool act_maitre_court(int n)
-{
-    if (n != 0) return false;              /* bouton 2 : comportement commun */
+    if (n != 0) return false;              /* bouton 2 : rien a faire */
     meteo_force = true;                    /* lecture fraiche (la tache reseau) */
     ui_read_sensors();
     ui_beep();
@@ -4117,63 +2706,9 @@ static bool act_maitre_court(int n)
     return true;
 }
 
-
-/* LAUNCHER : bouton 1 = tuile suivante, bouton 2 = ouvrir. L'appui long n'est
-   pas pris : il rend l'accueil comme partout. */
-static bool act_lanc_court(int n)
-{
-    if (n == 0) {
-        lanc_sel = (lanc_sel + 1) % LANC_N;
-    } else {
-        ui_page = LANC_PAGE[lanc_sel];
-        ESP_LOGI(TAG, "launcher : ouvre %s", PAGE_NOM[ui_page]);
-    }
-    show_ui();
-    return true;
-}
-
-static const page_act_t PAGE_ACT[PAGE_REG + 1] = {
-    /* ACCUEIL    */ { act_maitre_court, NULL, NULL, NULL },
-    /* METEO      */ { NULL, NULL, NULL, NULL },
-    /* SYSTEM     */ { NULL, NULL, NULL, NULL },
-    /* HISTORIQUE */ { NULL, NULL, act_hist_lng, NULL },
-    /* YOUTUBE    */ { NULL, NULL, NULL, NULL },
-    /* CONSEIL    */ { NULL, NULL, act_conseil_lng, NULL },
-    /* MATRIX     */ { NULL, NULL, act_matrix_lng, NULL },
-    /* LIVRE      */ { act_livre_court, act_livre_dbl, NULL, act_livre_rep },
-    /* LAUNCHER   */ { act_lanc_court, NULL, NULL, NULL },
-    /* REGLAGES   */ { act_reg_court, act_reg_dbl, act_reg_lng, NULL },
-};
-
-/* la ligne de la page courante, ou NULL si l'ecran n'est pas une page du cycle */
-static const page_act_t *page_act(void)
-{
-    if (ui_page < 0 || ui_page > PAGE_REG) return NULL;
-    return &PAGE_ACT[ui_page];
-}
-
-/* navigation dans le cycle : une dalle e-paper met ~1 s a se rafraichir et un
-   enchainement trop serre la met en panne. On ATTEND (on ne jette pas l'appui :
-   l'echantillonneur continue de remplir la file pendant ce temps). */
-static void page_cycle(int n)
-{
-    static int64_t dernier_changement = 0;
-    int64_t t = esp_timer_get_time() / 1000;
-    if (dernier_changement && t - dernier_changement < 1200) {
-        int64_t reste = 1200 - (t - dernier_changement);
-        ESP_LOGW(TAG, "page : appui rapproche, on attend %d ms", (int)reste);
-        vTaskDelay(pdMS_TO_TICKS(reste));
-    }
-    dernier_changement = esp_timer_get_time() / 1000;
-    ui_page = (n == 0) ? (ui_page + 1) % PAGE_COUNT
-                       : (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;
-    ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-suite" : "2-avant", PAGE_NOM[ui_page]);
-    show_ui();
-}
-
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
-    geste_ms = esp_timer_get_time() / 1000;   /* l'utilisateur reprend la main : la rotation attend */
+    geste_ms = esp_timer_get_time() / 1000;   /* l'utilisateur reprend la main */
     if (rep_bouton_court(n)) return;          /* la reponse en pages plein ecran */
     /* la sonnerie passe avant tout : le bouton 1 la fait taire */
     if (alarme_on && n == 0) {
@@ -4182,9 +2717,8 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         show_ui();
         return;
     }
-    const page_act_t *a = page_act();
-    if (a && a->court && a->court(n)) return;
-    /* une tache tourne : l'appui simple l'arrete au lieu de tourner la page */
+    /* une tache tourne (voix, radio, ecoute) : l'appui simple l'arrete avant
+       tout le reste, sinon un appui pendant l'ecoute relirait la meteo */
     if (wake_busy || radio_etat || voix_etat) {
         tache_arrete();
         ui_page = PAGE_MAITRE;
@@ -4192,26 +2726,23 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         show_ui();
         return;
     }
-    page_cycle(n);
+    if (act_tableau_court(n)) return;
+    /* il n'y a plus de page a tourner : l'appui court ne fait rien de plus */
 }
 
 static void bouton_double(int n)
 {
     geste_ms = esp_timer_get_time() / 1000;
-    const page_act_t *a = page_act();
-    if (a && a->dbl && a->dbl(n)) return;
     if (n == 0) {
-        /* LE geste de l'assistant : double appui bouton 1, depuis n'importe
-           quelle page. La reponse plein ecran se referme d'abord. */
+        /* LE geste de l'assistant : double appui bouton 1. La reponse plein
+           ecran se referme d'abord. */
         if (rep_ouvert) { rep_ferme(); show_ui(); }
         ESP_LOGI(TAG, "bouton 1 : double appui -> assistant");
         assistant_wake();
         return;
     }
-    /* double appui bouton 2 : plus rien a ouvrir depuis que le livre est
-       retire de l'ecran (11/11). Le geste reste muet plutot que de renvoyer
-       vers une page qui n'existe plus dans l'interface. */
-    ESP_LOGI(TAG, "bouton 2 : double appui (sans effet, plus de livre)");
+    /* double appui bouton 2 : sans effet depuis que le livre a quitte l'ecran */
+    ESP_LOGI(TAG, "bouton 2 : double appui (sans effet)");
     if (rep_ouvert) rep_ferme();
     ui_page = PAGE_MAITRE;
     show_ui();
@@ -4219,26 +2750,22 @@ static void bouton_double(int n)
 
 static void bouton_long(int n, int tres_long)
 {
+    (void)tres_long;
     geste_ms = esp_timer_get_time() / 1000;
     if (rep_bouton_long(n)) return;
-    const page_act_t *a = page_act();
-    if (a && a->lng && a->lng(n, tres_long != 0)) return;
-    /* appui long, les deux boutons : retour a l'accueil et arret de ce qui
-       tourne. Il ne lance plus l'assistant : c'est le double appui du bouton 1. */
+    /* appui long, les deux boutons : retour au tableau et arret de ce qui
+       tourne. Il ne lance plus l'assistant : c'est le double appui du 1. */
     tache_arrete();
     ui_page = PAGE_MAITRE;
     ESP_LOGI(TAG, "appui long : retour accueil");
     show_ui();
 }
-/* Le maintien prolonge : avec deux boutons seulement, c'est le seul moyen de
-   faire defiler sans appuyer dix fois. Une page qui n'en veut pas ne fait rien. */
+
+/* le maintien prolonge n'a plus de page a faire defiler */
 static void bouton_repeat(int n)
 {
-    geste_ms = esp_timer_get_time() / 1000;
-    if (rep_ouvert) return;                 /* la reponse se tourne au COURT */
-    const page_act_t *a = page_act();
-    if (a && a->rep && a->rep(n)) return;
     (void)n;
+    geste_ms = esp_timer_get_time() / 1000;
 }
 
 /* @@ROUTEUR_FIN@@ */
@@ -4422,10 +2949,9 @@ static esp_err_t h_bouton(httpd_req_t *req)
     char v[16] = "";
     if (qval(req, "p", v, sizeof(v)) == ESP_OK && v[0]) {
         int pg = atoi(v);
-        /* PAGE_COUNT = les pages du cycle ; LANCER (8) et REGLAGES (9) sont
-           hors cycle mais doivent rester joignables pour les tests */
-        if (pg >= 0 && pg <= PAGE_REG) {
-            ui_page = pg; timer_mode = 0;
+        /* une seule page : seul p=0 a un sens, les autres sont ignores */
+        if (pg == PAGE_MAITRE) {
+            ui_page = PAGE_MAITRE; timer_mode = 0;
             geste_ms = esp_timer_get_time() / 1000;   /* page imposee = geste : la rotation attend */
             show_ui();
         }
@@ -4440,7 +2966,7 @@ static esp_err_t h_bouton(httpd_req_t *req)
     }
     vTaskDelay(pdMS_TO_TICKS(500));            /* laisse la tache bouton agir */
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddStringToObject(r, "page", ui_page <= PAGE_REG ? PAGE_NOM[ui_page] : "?");
+    cJSON_AddStringToObject(r, "page", "ACCUEIL");
     cJSON_AddNumberToObject(r, "page_i", ui_page);
     return send_json(req, r);
 }
@@ -4507,20 +3033,11 @@ static void pet_charge(void)
    toucher aux boutons. On ne tourne jamais pendant que le robot travaille
    (ecoute, reflexion, reponse en pages) ni juste apres un geste : l'utilisateur
    doit garder la page qu'il vient de choisir. */
+/* la rotation automatique n'a plus d'objet : il n'y a qu'une page. Le moteur
+   reste (le reglage existe toujours dans /state) mais il ne fait rien. */
 static void rotation_tick(void)
 {
     if (!rotation_on || rotation_s <= 0) return;
-    if (act_on || wake_busy || rep_ouvert || alarme_on) return;
-    if (ui_page == PAGE_REG) return;                 /* le clavier, pas une page d'info */
-    if (ui_page == PAGE_LIVRE) return;               /* on ne tourne pas les pages d'un livre */
-    int64_t t = esp_timer_get_time() / 1000;
-    if (geste_ms && t - geste_ms < ROTATION_PAUSE_MS) return;
-    if (!rotation_ms) { rotation_ms = t; return; }   /* on demarre le compte ici */
-    if (t - rotation_ms < (int64_t)rotation_s * 1000) return;
-    rotation_ms = t;
-    ui_page = (ui_page + 1) % PAGE_COUNT;
-    ESP_LOGI(TAG, "rotation : page %s", PAGE_NOM[ui_page]);
-    show_ui();
 }
 
 static void pet_task(void *arg)
@@ -4670,32 +3187,20 @@ static void ui_task(void *arg)
            ne paie pas un TLS toutes les 15 min pour une page qu'on ne regarde
            pas) — sauf la premiere lecture, qui sert aussi a l'assistant */
         if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
-            (ui_page == PAGE_MAITRE || ui_page == PAGE_METEO || derniere_meteo == -100000) &&
             ((int)now - derniere_meteo >= METEO_PERIODE_S || meteo_force)) {
             meteo_force = false;
             derniere_meteo = (int)now;
             net_demande(NET_METEO);      /* la lecture TLS se fait ailleurs :
                                             l'ecran ne doit jamais l'attendre */
         }
-        /* la chaine YouTube : a l'ouverture de sa page, puis toutes les 30 min */
-        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) && ui_page == PAGE_YT &&
-            ((int)now - derniere_yt >= 1800 || yt_force)) {
-            yt_force = false;
-            derniere_yt = (int)now;
-            net_demande(NET_YT);
-            show_ui();
-        }
+        /* la chaine YouTube n'est plus lue : son bloc a quitte l'ecran et
+           personne d'autre ne consomme yt_titre (les champs restent dans /state) */
         /* les titres du moment : au demarrage puis toutes les 30 min, pour que
            le cerveau ait l'actualite du jour dans son contexte. */
         if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
             (int)now - dernieres_infos >= 1800) {
             dernieres_infos = (int)now;
             net_demande(NET_INFOS);
-        }
-        /* sur la page securite, on remesure toutes les 30 s */
-        if (ui_page == 99 && (int)now - last_secu >= 30) {
-            last_secu = (int)now;
-            secu_refresh();
         }
         /* page SYSTEM : mesure chaque seconde, mais une image toutes les 5 s
            (une image = 573 ms de clignotement, on ne peut pas faire mieux) */
@@ -4709,20 +3214,10 @@ static void ui_task(void *arg)
             show_ui();
         }
         ms_boucle();          /* calendrier : une passe par minute */
-        /* le banc systeme alimente aussi le tableau (cpu, ram) : on
-           l'echantillonne sur les deux ecrans, mais seule la page SYSTEM
-           redessine a sa propre cadence */
-        if (ui_page == PAGE_SYS || ui_page == PAGE_MAITRE) sys_page_entre();
-        else                                               sys_page_sort();
-        if (ui_page == PAGE_SYS || ui_page == PAGE_MAITRE) sys_echantillon();
-        if (ui_page == PAGE_SYS) {
-            static int64_t sys_derniere_ui = 0;
-            int64_t ms = esp_timer_get_time() / 1000;
-            if (ms - sys_derniere_ui >= reg_cadence * 1000) {
-                sys_derniere_ui = ms;
-                show_ui();
-            }
-        }
+        /* le banc systeme tourne toujours : c'est lui qui remplit cpu_pct,
+           ram et les watts de /state (le tableau ne les affiche plus) */
+        sys_page_entre();
+        sys_echantillon();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -5179,104 +3674,8 @@ static void wscan_tache(void *arg)
             ESP_LOGW(TAG, "reglages : scan refuse");
         }
         g_wscan_encours = false;
-        if (ui_page == PAGE_REG && reg_vue == REG_WIFI) show_ui();   /* la liste est prete */
     }
 }
-
-/* petits accesseurs : le dessin de la page est plus haut dans le fichier */
-static bool reg_scan_encours(void) { return g_wscan_encours || g_wscan_demande; }
-static int reg_scan_n(void) { return g_wscan_n; }
-static const char *reg_scan_ssid(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].ssid : ""; }
-static int reg_scan_rssi(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].rssi : 0; }
-static int reg_scan_auth(int i) { return (i >= 0 && i < g_wscan_n) ? g_wscan[i].auth : 0; }
-
-/* ---- boutons de la page REGLAGES ---- */
-static void reg_clavier_touche(void)
-{
-    const char *t = reg_touche(reg_sel);
-    if (!strcmp(t, "OK")) {
-        if (reg_valide()) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
-        return;
-    }
-    if (!strcmp(t, "EFF")) {
-        size_t n = strlen(reg_pass);
-        if (n) reg_pass[n - 1] = 0;
-        return;
-    }
-    if (!strcmp(t, "123")) { reg_page_k = 1; reg_sel = 0; return; }
-    if (!strcmp(t, "abc")) { reg_page_k = 0; reg_sel = 0; return; }
-    if (!strcmp(t, "ESP")) t = " ";
-    size_t n = strlen(reg_pass);
-    if (n < sizeof(reg_pass) - 1) { reg_pass[n] = t[0]; reg_pass[n + 1] = 0; }
-}
-
-static bool reg_valide(void)
-{
-    if (!reg_ssid[0]) return false;
-    if (reg_auth != 0 && !reg_pass[0]) return false;   /* reseau ferme sans mot de passe */
-    return true;
-}
-
-static void reg_bouton(int n)
-{
-    if (reg_vue == REG_MENU) {
-        if (n == 0) {
-            reg_ligne = (reg_ligne + 1) % 3;
-        } else {
-            if (reg_ligne == 0) {
-                reg_vue = REG_WIFI;
-                reg_sel = 0;
-                g_wscan_demande = true;
-            } else if (reg_ligne == 1) {
-                reg_cadence = reg_cadence == 5 ? 10 : (reg_cadence == 10 ? 30 : 5);
-            } else {
-                ESP_LOGI(TAG, "reglages : %s / %s / %d dBm / %d o libres", wifi_ssid_i(0),
-                         ip_courante(), (int)sec_rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-            }
-        }
-        return;
-    }
-    if (reg_vue == REG_WIFI) {
-        if (n == 0) {
-            if (g_wscan_n) reg_sel = (reg_sel + 1) % g_wscan_n;
-            else g_wscan_demande = true;
-        } else {
-            if (!reg_scan_n()) { g_wscan_demande = true; return; }
-            snprintf(reg_ssid, sizeof(reg_ssid), "%s", g_wscan[reg_sel].ssid);
-            reg_auth = (uint8_t)g_wscan[reg_sel].auth;
-            reg_pass[0] = 0;
-            reg_page_k = 0;
-            reg_sel = 0;
-            reg_vue = REG_CLAVIER;
-        }
-        return;
-    }
-    /* clavier */
-    if (n == 0) reg_sel = (reg_sel + 1) % reg_touches_n();
-    else        reg_clavier_touche();
-}
-
-static void reg_bouton_long(int n)
-{
-    if (reg_vue == REG_MENU) {        /* appui long 2 : on sort des reglages */
-        if (n == 1) { ui_page = PAGE_MAITRE; }
-        return;
-    }
-    if (n == 0) {                     /* effacer */
-        if (reg_vue == REG_CLAVIER) {
-            size_t l = strlen(reg_pass);
-            if (l) reg_pass[l - 1] = 0;
-        }
-        return;
-    }
-    /* bouton 2 long : valider au clavier, sinon remonter d'un cran */
-    if (reg_vue == REG_CLAVIER) {
-        if (reg_valide()) { wifi_bascule(reg_ssid, reg_pass); reg_vue = REG_MENU; reg_ligne = 0; }
-    } else if (reg_vue == REG_WIFI) {
-        reg_vue = REG_MENU;
-    }
-}
-
 
 static void wifi_scan_log(void)
 {
@@ -8668,7 +7067,7 @@ static esp_err_t h_rotation(httpd_req_t *req)
     char r[96];
     snprintf(r, sizeof(r), "{\"rotation\":%s,\"s\":%d,\"page\":\"%.10s\"}",
              rotation_on ? "true" : "false", rotation_s,
-             ui_page < PAGE_COUNT ? PAGE_NOM[ui_page] : "?");
+             "ACCUEIL");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, r);
     return ESP_OK;
@@ -8767,37 +7166,6 @@ static int hist_sd_cherche(const char *mots, char *out, size_t sz, int max)
    recent. */
 #define HISTVU_LIGNES 9
 #define HISTVU_COLS   24
-
-static void draw_app_hist(void)
-{
-    char b[40];
-    a_text(6, 2, 3, "HISTORIQUE");
-    snprintf(b, sizeof(b), "%u ech.", (unsigned)(hist_sd_pret ? hist_sd_tours : (uint32_t)hist.n));
-    a_text(192 - a_text_w(2, b), 4, 2, b);
-    a_hline(4, 195, 19, 1);
-
-    if (!hist_p || hist.n == 0) {
-        texte_grand(70, 2, "AUCUN ECHANGE POUR L INSTANT", 3);
-        return;
-    }
-    int dernier = hist.n - 1 - hist_vue;
-    if (dernier < 0) dernier = 0;
-    char lignes[HISTVU_LIGNES][HISTVU_COLS + 1];
-    int nl = 0;
-    for (int i = dernier; i >= 0 && nl < HISTVU_LIGNES; i--) {
-        const char *txt = hist_p->txt[i];
-        snprintf(lignes[nl], sizeof(lignes[nl]), "%s%.18s%s",
-                 hist_est_mino(hist_p, i) ? "R: " : "Q: ", txt,
-                 strlen(txt) > 19 ? "..." : "");
-        nl++;
-    }
-    int y = 26;
-    for (int k = nl - 1; k >= 0; k--) {
-        a_text(4, y, 2, lignes[k]);
-        y += 16;
-    }
-    a_text_c(100, 186, 1, hist_vue ? "1 = PLUS VIEUX   1L = RECENT" : "1 = PLUS VIEUX");
-}
 
 /* /part                       -> etat des partitions
    /part?op=repart&fat_go=100  -> repartitionne (destructif) : FAT32 100 Go + reste brut
@@ -9018,29 +7386,24 @@ static esp_err_t h_livre(httpd_req_t *req)
         if (!livre_ouvre(f, n > 0 ? n - 1 : 0))
             return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "livre illisible");
         livre_memo();
-        ui_page = PAGE_LIVRE;
-        show_ui();
+        show_ui();                  /* l'ecran est le tableau : rien a changer */
     } else if (!strcmp(op, "page")) {
         if (!livre_pret) livre_reprise();
         if (!livre_pret) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "aucun livre");
         if (n > 0) { livre_va(&livre, n - 1); livre_memo(); }
-        ui_page = PAGE_LIVRE;
-        show_ui();
+        show_ui();                  /* l'ecran est le tableau : rien a changer */
     } else if (!strcmp(op, "suiv") || !strcmp(op, "avance")) {
         if (!livre_pret) livre_reprise();
         if (!livre_pret) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "aucun livre");
         if (d == 0) d = 1;
         livre_tourne(d);
-        ui_page = PAGE_LIVRE;
-        show_ui();
+        show_ui();                  /* l'ecran est le tableau : rien a changer */
     } else if (!strcmp(op, "change")) {
         if (!livre_pret) livre_reprise();
         livre_suivant(d ? d : 1);
-        ui_page = PAGE_LIVRE;
-        show_ui();
+        show_ui();                  /* l'ecran est le tableau : rien a changer */
     } else if (!strcmp(op, "ferme")) {
         livre_arret();
-        ui_page = PAGE_MAITRE;
         show_ui();
     }
     return send_json(req, livre_json());
@@ -9652,7 +8015,7 @@ static void mino_handle_line(const char *line)
         ESP_LOGI(TAG, "diag : rappel_nb=%d dernier='%s' alarme=%d jouee=%d timers_actifs=%d",
                  rappel_nb, rappel_dernier, alarme_on ? 1 : 0, alarme_jouee, nt);
         ESP_LOGI(TAG, "diag : page=%s app=%s app_mem=%d boot_nb=%d heap_int_max=%u psram=%u",
-                 PAGE_NOM[ui_page], app_mem_octets ? PAGE_NOM[page_app >= 0 ? page_app : 0] : "aucune",
+                 "ACCUEIL", 0,
                  app_mem_octets, (int)boot_nb,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -9967,14 +8330,7 @@ static void mino_handle_line(const char *line)
         show_ui();
         return;
     }
-    if (!strcmp(line, "appli") || !strncmp(line, "appli ", 6)) {
-        /* pratique pour verifier les ecrans : "appli N" (0..4), "appli" = suivant */
-        if (line[5] == ' ') ui_page = atoi(line + 6) % PAGE_COUNT;
-        else ui_page = (ui_page + 1) % PAGE_COUNT;
-        ESP_LOGI(TAG, "appli %d", ui_page);
-        show_ui();
-        return;
-    }
+    /* la commande "appli N" a disparu avec les pages : "ui" redessine */
     if (!strcmp(line, "journal")) {
         for (int i = 0; i < journal_n; i++)
             ESP_LOGI(TAG, "journal %d/%d : %s", i + 1, journal_n,
@@ -9987,7 +8343,7 @@ static void mino_handle_line(const char *line)
         if (strstr(line, "long"))      bouton_long(n, 0);
         else if (strstr(line, "dbl"))  bouton_double(n);
         else                            bouton_court(n);
-        ESP_LOGI(TAG, "essai bouton %d -> page %s%s", n + 1, PAGE_NOM[ui_page],
+        ESP_LOGI(TAG, "essai bouton %d -> page ACCUEIL%s", n + 1,
                  avant != ui_page || strstr(line, "dbl") ? "" : " (ignore)");
         return;
     }
@@ -10062,7 +8418,6 @@ static void mino_handle_line(const char *line)
             sscanf(line, "livre ouvre %39s %d", arg, &pg);
             if (livre_ouvre(arg, pg > 0 ? pg - 1 : 0)) {
                 livre_memo();
-                ui_page = PAGE_LIVRE;
                 show_ui();
             } else {
                 ESP_LOGW(TAG, "livre : %s illisible", arg);
@@ -10072,17 +8427,14 @@ static void mino_handle_line(const char *line)
             if (!livre_pret) livre_reprise();
             int pg = atoi(arg);
             if (livre_pret && pg > 0) { livre_va(&livre, pg - 1); livre_memo(); }
-            ui_page = PAGE_LIVRE;
             show_ui();
         } else if (!strcmp(quoi, "suiv") || !strcmp(quoi, "prec")) {
             if (!livre_pret) livre_reprise();
             livre_tourne(!strcmp(quoi, "suiv") ? 1 : -1);
-            ui_page = PAGE_LIVRE;
             show_ui();
         } else if (!strcmp(quoi, "change")) {
             if (!livre_pret) livre_reprise();
             livre_suivant(1);
-            ui_page = PAGE_LIVRE;
             show_ui();
         } else {
             ESP_LOGW(TAG, "livre : commande inconnue (%s)", quoi);
@@ -10095,13 +8447,9 @@ static void mino_handle_line(const char *line)
         return;
     }
     if (!strcmp(line, "ui") || !strncmp(line, "ui ", 3)) {
-        if (line[2] == ' ') {
-            int p = atoi(line + 3);
-            if (p >= 0 && p < PAGE_COUNT) { ui_page = p; rep_ouvert = false; }
-            else if (line[3] == 'f') ui_face = (ui_face + 1) % EXPR_N;
-        }
+        /* il n'y a plus qu'une page : "ui" redessine le tableau, le numero
+           eventuellement tape est ignore (les vieux scripts continuent) */
         ui_read_sensors();
-        if (ui_page == 99) { secu_refresh(); secu_sweep(); }
         show_ui();
         ESP_LOGI(TAG, "page=%d visage=%s temp=%.1f humi=%.0f wifi=%s shtc=%s",
                  ui_page, EXPR[ui_face].nom, (double)ui_temp, (double)ui_humi,
@@ -10805,7 +9153,6 @@ static void conseil_une_passe(void)
         conseil_etat = 1;
         ESP_LOGI(TAG, "conseil %d : %s", (int)conseil_passes,
                  conseil_vide ? "(rien a signaler)" : conseil_txt);
-        if (ui_page == PAGE_CONSEIL && !act_on) redraw_demande = true;
     } else {
         conseil_etat = 5;
         ESP_LOGW(TAG, "conseil : passe sans reponse (%s)", esp_err_to_name(e));
@@ -10968,7 +9315,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "chrono_tts_ms", (double)chrono_tts_ms);
     cJSON_AddNumberToObject(r, "radio_etat", (double)radio_etat);
     cJSON_AddStringToObject(r, "radio_station", radios_n > 0 ? radios_nom[radio_sel] : "");
-    cJSON_AddStringToObject(r, "page", ui_page <= PAGE_REG ? PAGE_NOM[ui_page] : "?");
+    cJSON_AddStringToObject(r, "page", "ACCUEIL");
     cJSON_AddStringToObject(r, "livre", livre_pret ? livre.nom : "");
     cJSON_AddStringToObject(r, "livre_fichier", livre_dernier);
     cJSON_AddNumberToObject(r, "livre_page", livre_pret ? (double)(livre.page + 1) : 0);

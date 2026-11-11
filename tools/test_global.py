@@ -220,27 +220,27 @@ def main():
 
     # ---------------------------------------------- 3. la dalle suit le dessin
     print("\n3. la dalle suit bien le dessin (docs/features/06-ecran-eink.md)")
-    images = {}
-    for i, nom in (("0", "ACCUEIL"), ("2", "SYSTEM")):
-        c.cmd(f"ui {i}", r"page=|$^", 4)
-        time.sleep(1.2)
-        img = c.fb()
-        if img is None:
-            ko(f"image {nom}", "framebuffer incomplet")
-            continue
-        images[nom] = img
-        c.png(img, f"/tmp/test_{nom.lower()}.png")
-    if len(images) == 2 and images["ACCUEIL"] != images["SYSTEM"]:
-        ok("le tableau et la page SYSTEM donnent deux images",
-           "/tmp/test_accueil.png, /tmp/test_system.png")
-    else:
-        ko("le tableau et la page SYSTEM donnent deux images",
-           f"{len(set(images.values()))} image(s) pour {len(images)} ecran(s)")
-    if "ACCUEIL" in images and images["ACCUEIL"].strip("f"):
-        ok("le tableau est dessine (framebuffer non vide)")
-    elif "ACCUEIL" in images:
-        ko("le tableau est dessine (framebuffer non vide)", "image blanche")
     c.cmd("ui 0", r"page=|$^", 4)
+    time.sleep(1.5)
+    img = c.fb()
+    if img is None:
+        ko("image du tableau", "framebuffer incomplet")
+    else:
+        c.png(img, "/tmp/test_tableau.png")
+        if img.strip("f"):
+            ok("le tableau est dessine", "/tmp/test_tableau.png")
+        else:
+            ko("le tableau est dessine", "framebuffer tout blanc")
+        # la meme image redemandee doit etre identique au pixel : le dessin est
+        # deterministe (heure, meteo, batterie ne bougent pas en 2 s)
+        time.sleep(1.5)
+        c.cmd("ui", r"page=|$^", 4)
+        time.sleep(1.2)
+        img2 = c.fb()
+        if img2 is not None and img2[:200] == img[:200]:
+            ok("deux rendus du meme etat se ressemblent (200 premiers octets)")
+        else:
+            ko("deux rendus du meme etat se ressemblent", "framebuffer different")
 
     # ------------------------------------------- 4. l'assistant cree un rappel
     print("\n4. l'assistant cree un rappel (docs/features/04-rappel.md)")

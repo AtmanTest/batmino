@@ -8,15 +8,18 @@ la dalle met une seconde à se rafraîchir.
 
 | Geste | Bouton 1 (BOOT) | Bouton 2 (PWR) |
 |---|---|---|
-| appui court | relit les données du tableau (1 = suite dans REPONSE) | rien sur le tableau (2 = avant dans REPONSE) |
-| double appui | lance l'assistant vocal (et **lui seul**) | sans effet depuis le 11/11 (plus de livre à ouvrir) |
-| appui long | retour à l'accueil, tâche en cours arrêtée | idem |
-| maintien prolongé | répète l'action de la page | idem, sens inverse |
+| appui court | relit les données du tableau (1 = suite dans REPONSE) | rien (2 = avant dans REPONSE) |
+| double appui | lance l'assistant vocal (et **lui seul**) | sans effet |
+| appui long | retour au tableau, tâche en cours arrêtée | idem |
+| maintien prolongé | rien (aucune page à faire défiler) | rien |
 
 Depuis la page unique (11/11), il n'y a plus qu'un écran : « page suivante » n'a
 plus de sens, et le bouton 1 court sert à redemander une lecture fraîche (météo,
 capteurs). Le livre a quitté l'écran le même jour : plus aucun geste ne l'ouvre,
 il se pilote par le web (`/livre?op=liste`).
+
+**Une tâche en cours passe avant la relecture** : pendant une écoute, une radio
+ou une voix, l'appui simple l'arrête au lieu de relire la météo.
 
 Règles qui ne changent pas :
 
@@ -115,20 +118,11 @@ Rejoués par `tools/test_global.py` (section 2), et à la main par la console US
 Sur le PC, `tests/unit/test_routeur.cpp` rejoue ces gestes (42 vérifications) :
 le vrai bloc du routeur, extrait de `main.cpp` et compilé contre des stubs.
 
-### Le routage : une ligne par page
+### Le routage : quatre fonctions, pas de table
 
-Chaque page déclare ses gestes dans une table, et rien d'autre :
-
-    typedef struct { bool (*court)(int); bool (*dbl)(int);
-                     bool (*lng)(int, bool); bool (*rep)(int); } page_act_t;
-
-    /* ACCUEIL */ { act_maitre_court, NULL, act_maitre_lng, NULL }
-    /* LIVRE   */ { act_livre_court, act_livre_dbl, NULL, act_livre_rep }
-    /* REG     */ { act_reg_court, act_reg_dbl, act_reg_lng, NULL }
-    /* CONSEIL */ { NULL, NULL, act_conseil_lng, NULL }
-
-Un pointeur nul = la page ne prend pas ce geste, le comportement commun
-s'applique. Ajouter une page ne demande plus de rouvrir `bouton_court`.
+Il n'y a plus qu'une page, donc plus de table « une ligne par page ». Le
+routeur tient dans `bouton_court`, `bouton_double`, `bouton_long` et
+`bouton_repeat`, avec un seul geste propre (`act_tableau_court`, le bouton 1).
 
 L'ordre de priorité est celui d'avant, et il est explicite dans le code :
 

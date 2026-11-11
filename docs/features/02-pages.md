@@ -6,25 +6,26 @@ Depuis le 11/11, le robot n'a plus de cycle d'applis : **un seul écran, le
 tableau**, porte tout ce qu'il sait. Rien à faire défiler pour retrouver une
 information : elle est là, ou elle n'existe pas.
 
-    y 0    heure en corps 6 (18:54 = 114 px de large), date sur deux lignes
-           à droite (MER 11 / NOV) et l'icône de signal du Wi-Fi
-    y 38   filet
-    y 42   ciel : 13.6C en corps 4, l'état du ciel à droite, puis DEM 5-11C
-           avec PLUIE n% à droite, puis INT 24.5C 36%
-    y 90   filet
-    y 94   batterie : 36% en corps 4 et sa jauge de 16 px de haut
-    y 116  filet
-    y 120  les quatre jauges du compagnon en deux colonnes (FAIM, BONH |
-           ENER, SANTE), barres de 43 x 14 px
-    y 156  filet
-    y 161  agenda du jour (ou ALARME 1=STOP, ou n RAPPELS)
-    y 176  dernier mot, deux lignes
+    y 0    heure en corps 7 (18:54 = 133 px de large) et l'icône de signal
+    y 40   la date en corps 3 : MER 11 NOV
+    y 58   filet
+    y 62   la température du moment, dehors, en corps 4
+    y 86   l'état du ciel en clair, en corps 3
+    y 106  INT 24C : le capteur interne, en corps 3
+    y 126  DEM 5-11C : demain, en corps 3
+    y 144  filet
+    y 148  71% en corps 4 et la jauge de batterie (18 px de haut)
+    y 172  filet
+    y 176  l'agenda du jour en corps 4 (ou ALARME 1=STOP)
 
-**Rien en corps 1.** La plus petite taille de texte de la page est le corps 2
-(glyphes de 6 x 10 px) : en dessous, c'est illisible sur une dalle de 200 px de
-côté. Tout ce qui ne tenait pas dans cette taille a été retiré de l'écran
-(état système, uptime, nom de la borne, consommation en watts, stade et âge du
-compagnon, conseil, YouTube, livre).
+**Rien en dessous du corps 3.** La plus petite taille de texte de la page est
+le corps 3 (glyphes de 9 x 15 px) : en dessous, c'est illisible sur une dalle de
+200 px de côté. Tout ce qui ne tenait pas dans cette taille a été retiré de
+l'écran : état système (cpu, ram, uptime), nom de la borne, consommation en
+watts, le compagnon et ses quatre jauges (faim, bonheur, énergie, santé), son
+visage, le conseil, le dernier mot, YouTube et le livre. Une ligne à demain ne
+porte que la plage de températures : à ce corps, « PLUIE 20% » ne tient plus à
+côté.
 
 Règle de lecture, héritée du reste du firmware : **une valeur indisponible
 affiche `N.D.` ou `--`, jamais zéro ni un nom supposé.** Une jauge inconnue
