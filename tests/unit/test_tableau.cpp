@@ -45,22 +45,17 @@ static void plein(tableau_t *t)
     memset(t, 0, sizeof(*t));
     t->heure = 18; t->minute = 54; t->sem = 3; t->jour = 11; t->mois = 10;
     t->wifi = true;
-    snprintf(t->ssid, sizeof(t->ssid), "MON_RESEAU_SECOURS");
     t->rssi = -52;
-    t->bat_pct = 36; t->conso_mw = 270; t->uptime_min = 133;
+    t->bat_pct = 36; t->conso_mw = 270;
     t->capteur = true; t->temp_int = 24.6f; t->humi = 41.0f;
     t->meteo = true; t->meteo_c = 13.6f;
     snprintf(t->meteo_txt, sizeof(t->meteo_txt), "NUAGEUX");
     t->dem_min = 9; t->dem_max = 14; t->dem_pluie = 20;
-    t->stade = "ADULTE"; t->forme = "HEROS"; t->emotion = "calme"; t->age_j = 5;
     t->faim = 100; t->bonheur = 82; t->energie = 64; t->sante = 38;
-    t->cpu_pct = 1; t->ram_libre_k = 228;
     snprintf(t->rdv_quand, sizeof(t->rdv_quand), "DEMAIN 09:00");
     snprintf(t->rdv_qui, sizeof(t->rdv_qui), "DENTISTE");
     snprintf(t->dernier, sizeof(t->dernier),
              "Tu as dit que tu voulais ranger l'atelier ce week-end.");
-    snprintf(t->conseil, sizeof(t->conseil),
-             "Batterie a 36, branche le chargeur avant ce soir.");
     t->visage = 1;
 }
 
@@ -89,13 +84,12 @@ int main(void)
     printf("       (encre : %d px, %d %%)\n", e, pct);
 
     /* ---- 2. chaque zone de la page est servie ---- */
-    VERIF(encre_bande(0, 32) > 300, "en-tete : heure et visage dessines");
-    VERIF(encre_bande(34, 45) > 30, "filet d'etat : reseau et uptime");
-    VERIF(encre_bande(48, 77) > 100, "rangee 1 : meteo et demain");
-    VERIF(encre_bande(80, 109) > 100, "rangee 2 : interieur et batterie");
-    VERIF(encre_bande(112, 141) > 100, "rangee 3 : systeme et agenda");
-    VERIF(encre_bande(144, 171) > 60, "rangee 4 : dernier mot et conseil");
-    VERIF(encre_bande(174, 199) > 150, "pied : les quatre jauges du compagnon");
+    VERIF(encre_bande(0, 36) > 300, "en-tete : heure, date et visage dessines");
+    VERIF(encre_bande(40, 88) > 150, "bloc ciel : meteo, demain, interieur");
+    VERIF(encre_bande(92, 114) > 100, "bloc batterie");
+    VERIF(encre_bande(118, 154) > 150, "les quatre jauges du compagnon");
+    VERIF(encre_bande(158, 172) > 30, "ligne agenda");
+    VERIF(encre_bande(176, 199) > 60, "le dernier mot");
 
     /* ---- 3. le rendu est deterministe ---- */
     static uint8_t ref[ART_FB_LEN];
@@ -117,8 +111,8 @@ int main(void)
         VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "changer l'agenda change l'image");
         plein(&v); v.faim = 10; v.bonheur = 100;                   rend(&v);
         VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "changer les jauges change l'image");
-        plein(&v); v.dernier[0] = 0; v.conseil[0] = 0;             rend(&v);
-        VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "perdre les deux textes change l'image");
+        plein(&v); v.dernier[0] = 0;                               rend(&v);
+        VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "perdre le dernier mot change l'image");
     }
 
     /* ---- 5. donnees absentes : N.D. / --, jamais un zero ni un nom suppose ---- */
@@ -130,15 +124,16 @@ int main(void)
         v.bat_pct = -1; v.conso_mw = -1;
         v.capteur = false;
         v.meteo = false; v.dem_min = -999;
-        v.stade = "N.D."; v.forme = ""; v.emotion = "N.D.";
         v.faim = v.bonheur = v.energie = v.sante = -1;
-        v.age_j = -1;
         rend(&v);
         VERIF(encre() > 800, "la page reste dessinee sans aucune donnee");
-        VERIF(encre_bande(34, 45) > 20, "hors ligne : le filet d'etat le dit");
-        /* les jauges inconnues ne dessinent pas de barre pleine */
-        int bas = encre_bande(174, 199);
-        VERIF(bas < 400, "jauges n.d. : pas de barres pleines");
+        /* les jauges inconnues ne dessinent pas de barre : le cadre de la
+           jauge FAIM (x 48..90, y 120..134) doit rester vide */
+        int dedans = 0;
+        for (int y = 121; y <= 133; y++)
+            for (int x = 55; x <= 89; x++)
+                if (!((fb[y * 25 + (x >> 3)] >> (7 - (x & 7))) & 1)) dedans++;
+        VERIF(dedans == 0, "jauge n.d. : aucune barre dessinee");
     }
 
     /* ---- 6. debordement de texte : rien ne sort du cadre ---- */
@@ -146,9 +141,7 @@ int main(void)
         tableau_t v;
         plein(&v);
         memset(v.dernier, 'B', sizeof(v.dernier) - 1);   /* 95 signes */
-        memset(v.conseil, 'C', sizeof(v.conseil) - 1);
         memset(v.rdv_qui, 'D', sizeof(v.rdv_qui) - 1);
-        memset(v.ssid, 'E', sizeof(v.ssid) - 1);
         rend(&v);
         /* la derniere colonne de pixels reste blanche : rien n'a deborde */
         int bord = 0;

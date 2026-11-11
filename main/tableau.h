@@ -22,15 +22,13 @@ typedef struct {
     int  jour, mois;              /* 11, 11 */
     int  sem;                     /* 0 = dimanche ... 6 = samedi */
 
-    /* --- reseau --- */
+    /* --- reseau (l'icone seule : la page ne montre plus le nom) --- */
     bool wifi;
-    char ssid[TAB_SSID_MAX];
     int  rssi;                    /* dBm, 0 = inconnu */
 
     /* --- energie --- */
     int  bat_pct;                 /* -1 = pas de batterie (USB) */
     int  conso_mw;                /* -1 = inconnu */
-    int  uptime_min;
 
     /* --- capteur interne (SHTC3) --- */
     bool  capteur;                /* false : on ecrit N.D. */
@@ -42,24 +40,16 @@ typedef struct {
     char  meteo_txt[24];
     int   dem_min, dem_max, dem_pluie;   /* -999 = inconnu */
 
-    /* --- compagnon --- */
-    const char *stade, *forme, *emotion;
-    int  faim, bonheur, energie, sante;  /* 0..100, -1 = inconnu */
-    int  age_j;
-
-    /* --- banc systeme --- */
-    int      cpu_pct;
-    unsigned ram_libre_k;
-    unsigned ram_tot_k;
+    /* --- compagnon (ses quatre jauges, 0..100, -1 = inconnu) --- */
+    int  faim, bonheur, energie, sante;
 
     /* --- agenda --- */
     char rdv_quand[24];           /* "DANS 45 MIN", "DEMAIN 09:00", "" = rien */
     char rdv_qui[28];
     int  rappels;                 /* minuteurs en cours */
 
-    /* --- ce qu'il a dit en dernier / son conseil --- */
+    /* --- ce qu'il a dit en dernier --- */
     char dernier[TAB_TXT_MAX];
-    char conseil[TAB_TXT_MAX];
 
     /* --- etat --- */
     bool alarme;

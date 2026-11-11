@@ -6,20 +6,25 @@ Depuis le 11/11, le robot n'a plus de cycle d'applis : **un seul écran, le
 tableau**, porte tout ce qu'il sait. Rien à faire défiler pour retrouver une
 information : elle est là, ou elle n'existe pas.
 
-    y 0    heure (corps 6), visage du compagnon, date, batterie
-    y 33   filet
-    y 36   état : borne Wi-Fi + RSSI + uptime
-    y 45   filet
-    y 49   MÉTÉO (température et ciel)        | DEMAIN (plage, pluie)
-    y 78   filet
-    y 81   INTÉRIEUR (capteur, stade, forme)  | BATTERIE (jauge, watts)
-    y 110  filet
-    y 113  SYSTÈME (cpu, ram)                 | AGENDA (prochain rdv ou minuteurs)
-    y 142  filet
-    y 145  DERNIER MOT (3 lignes)             | CONSEIL (3 lignes)
-    y 172  filet
-    y 176  pied : les quatre jauges du compagnon, en deux colonnes
-           (FAIM, BONH | ENER, SANTE) avec leur valeur en clair
+    y 0    heure en corps 6 (18:54 = 114 px de large), date sur deux lignes
+           à droite (MER 11 / NOV) et l'icône de signal du Wi-Fi
+    y 38   filet
+    y 42   ciel : 13.6C en corps 4, l'état du ciel à droite, puis DEM 5-11C
+           avec PLUIE n% à droite, puis INT 24.5C 36%
+    y 90   filet
+    y 94   batterie : 36% en corps 4 et sa jauge de 16 px de haut
+    y 116  filet
+    y 120  les quatre jauges du compagnon en deux colonnes (FAIM, BONH |
+           ENER, SANTE), barres de 43 x 14 px
+    y 156  filet
+    y 161  agenda du jour (ou ALARME 1=STOP, ou n RAPPELS)
+    y 176  dernier mot, deux lignes
+
+**Rien en corps 1.** La plus petite taille de texte de la page est le corps 2
+(glyphes de 6 x 10 px) : en dessous, c'est illisible sur une dalle de 200 px de
+côté. Tout ce qui ne tenait pas dans cette taille a été retiré de l'écran
+(état système, uptime, nom de la borne, consommation en watts, stade et âge du
+compagnon, conseil, YouTube, livre).
 
 Règle de lecture, héritée du reste du firmware : **une valeur indisponible
 affiche `N.D.` ou `--`, jamais zéro ni un nom supposé.** Une jauge inconnue
@@ -29,11 +34,11 @@ affiche un tiret, pas une barre vide (qui se lirait « à zéro »).
 
 | Avant | Maintenant |
 |---|---|
-| page METEO | rangée 1 du tableau |
-| page SYSTEM | rangées 2 (batterie) et 3 (cpu, ram) |
-| page ACCUEIL (heure, date, rdv) | en-tête et rangée 3 |
-| page HISTORIQUE | « DERNIER MOT » (rangée 4) |
-| page CONSEIL | « CONSEIL » (rangée 4) |
+| page METEO | bloc « ciel » du tableau |
+| page SYSTEM | **retirée** : cpu, ram, watts et uptime ne tiennent pas en corps 2 |
+| page ACCUEIL (heure, date, rdv) | en-tête et ligne agenda |
+| page HISTORIQUE | « dernier mot » en bas : les deux dernières lignes de MINO |
+| page CONSEIL | **retiré de l'écran** (le conseil reste dans /state et pour l'assistant) |
 | page YOUTUBE | **retirée** le 11/11 (plus affichée, plus relue : son TLS toutes les 30 min n'a plus de consommateur) |
 | page LIVRE | **retirée de l'écran** le 11/11 ; le lecteur reste dans le firmware et se pilote par le web (`/livre?op=liste`) |
 | launcher (grille de 8 tuiles) | supprimé : plus rien à lancer |
@@ -88,12 +93,12 @@ montre plus et son lecteur se pilote par le web.
 
 | Test | Attendu |
 |---|---|
-| `bash tests/run_unit.sh` | `test_tableau` : 19 vérifications vertes |
-| encre | la page porte du contenu (19 % de pixels noirs avec un jeu complet) et reste sous 45 % |
-| zones | les sept bandes (en-tête, état, 4 rangées, pied) contiennent de l'encre |
+| `bash tests/run_unit.sh` | `test_tableau` : 18 vérifications vertes |
+| encre | la page porte du contenu (14 % de pixels noirs avec un jeu complet) et reste sous 45 % |
+| zones | les six bandes (en-tête, ciel, batterie, jauges, agenda, dernier mot) contiennent de l'encre |
 | déterminisme | deux rendus de la même donnée sont identiques au pixel |
 | sensibilité | changer l'heure, la batterie, la météo, l'agenda, les jauges ou les deux textes change l'image |
-| données absentes | la page reste dessinée, `N.D.` / `--`, aucune jauge pleine |
+| données absentes | la page reste dessinée, `N.D.` / `--`, et le cadre de la jauge FAIM reste vide |
 | texte très long | 95 signes dans chaque champ : la dernière colonne de pixels reste blanche |
 
 Sur la carte (après flash) : `/state` doit annoncer le nouvel `app`, `page` =

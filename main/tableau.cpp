@@ -1,20 +1,19 @@
 /*  tableau.cpp - la page unique du BATMino (200x200, 1 bit).
  *
- *  Plan de la page :
+ *  Version "gros caracteres" (11/11) : plus rien en corps 1. La plus petite
+ *  taille de texte de la page est le corps 2 (glyphes de 6x10 px) : en dessous,
+ *  c'est illisible sur une dalle de 200 px de cote.
  *
- *     0   en-tete   heure (corps 6), visage du compagnon, date, batterie
- *    33   filet
- *    36   etat      borne wifi + rssi, uptime
- *    45   filet
- *    49   rangee 1  METEO (ciel du moment)      | DEMAIN (plage, pluie)
- *    78   filet
- *    81   rangee 2  INTERIEUR (capteur, stade)  | BATTERIE (jauge, watts)
- *   110   filet
- *   113   rangee 3  SYSTEME (cpu, ram)          | AGENDA (prochain rdv)
- *   142   filet
- *   145   rangee 4  DERNIER MOT (2 lignes)      | CONSEIL (2 lignes)
- *   168   filet
- *   171   pied      youtube, livre, jauges du compagnon, gestes
+ *     0    heure (corps 7), date, visage du compagnon, etat du wifi
+ *    38    filet
+ *    42    ciel : temperature du moment (corps 4), etat, demain, interieur
+ *    90    filet
+ *    94    batterie : pourcentage (corps 4), jauge, consommation
+ *   116    filet
+ *   120    les quatre jauges du compagnon, en deux colonnes
+ *   156    filet
+ *   161    agenda du jour
+ *   178    dernier mot (deux lignes de corps 2)
  *
  *  Regle : une valeur indisponible affiche N.D. ou --, jamais zero ni un nom
  *  suppose. Aucune dependance ESP-IDF : le meme code tourne sur la carte et
@@ -38,9 +37,6 @@ static void txt_r(int xr, int y, int s, const char *str)
     a_text(xr - a_text_w(s, str), y, s, str);
 }
 
-/* etiquette de section, corps 1 */
-static void lab(int x, int y, const char *str) { a_text(x, y, 1, str); }
-
 /* un nombre a une decimale (13.6), sans passer par %f de newlib */
 static const char *un_chiffre(char *b, size_t n, float v)
 {
@@ -53,24 +49,24 @@ static const char *un_chiffre(char *b, size_t n, float v)
     return b;
 }
 
-/* le signe pourcent : deux points et une barre. Le glyphe 3x5 du jeu de
-   caracteres ressemble a un Z a partir du corps 2, on le dessine donc. */
+/* le signe pourcent : deux points et une barre. Le glyphe 3x5 ressemble a un Z
+   des le corps 2, on le dessine donc a la main. */
 static int pct_signe(int x, int y, int s)
 {
-    /* deux points fins et une barre de 1 px : a ce corps, des points epais
-       transforment le signe en X */
-    int sz = 4 * s, dot = (s >= 3) ? 2 : 1;
+    int sz = 4 * s, dot = (s >= 4) ? 3 : (s >= 3) ? 2 : 1;
     for (int dy = 0; dy < dot; dy++)
         for (int dx = 0; dx < dot; dx++) {
-            a_px(x + dx, y + dy, 1);                       /* point haut-gauche */
-            a_px(x + sz - dot + dx, y + sz - dot + dy, 1); /* point bas-droite */
+            a_px(x + dx, y + dy, 1);                        /* le point d'en haut */
+            a_px(x + sz - dot + dx, y + sz - dot + dy, 1);   /* celui d'en bas */
         }
-    for (int k = 0; k <= sz; k++)
-        a_px(x + sz - k, y + k, 1);                        /* la barre oblique */
+    /* la barre s'arrete a 2 px des coins : collee aux points, elle se lit
+       comme une simple barre oblique */
+    for (int k = 2; k <= sz - 2; k++)
+        a_px(x + sz - k, y + k, 1);
     return sz + 1;
 }
 
-/* "36%" : le nombre, puis le signe */
+/* "36%" : le nombre, puis le signe (renvoie la largeur) */
 static int nombre_pct(int x, int y, int s, int v)
 {
     char b[12];
@@ -95,6 +91,7 @@ static void coupe(char *dst, size_t cap, const char *src, int max_chars)
     }
 }
 
+/* une jauge encadree : contour + remplissage (x, y = coin haut-gauche) */
 static void barre(int x, int y, int w, int h, int pct)
 {
     if (pct < 0)   pct = 0;
@@ -109,29 +106,28 @@ static void barre(int x, int y, int w, int h, int pct)
             a_px(x + 1 + dx, y + dy, 1);
 }
 
-/* un texte en trois lignes de "cols" signes au plus, coupees sur un espace ;
-   ce qui reste apres la troisieme ligne est perdu (la page n'a pas de place) */
-static void trois_lignes(char *l1, char *l2, char *l3, const char *src, int cols)
+/* un texte en deux lignes de "cols" signes au plus (le reste est perdu) */
+static void deux_lignes(char *l1, char *l2, const char *src, int cols)
 {
-    l1[0] = l2[0] = l3[0] = 0;
+    l1[0] = l2[0] = 0;
     if (!src || !src[0]) return;
-    char *dst[3] = { l1, l2, l3 };
     const char *p = src;
-    for (int i = 0; i < 3 && *p; i++) {
+    for (int i = 0; i < 2 && *p; i++) {
+        char *dst = (i == 0) ? l1 : l2;
         while (*p == ' ') p++;
         if (!*p) break;
         int n = (int)strlen(p);
-        if (n <= cols) { snprintf(dst[i], 40, "%s", p); return; }
+        if (n <= cols) { snprintf(dst, 48, "%s", p); return; }
         int k = cols;
-        while (k > 6 && p[k] != ' ') k--;
-        if (k <= 6) k = cols;
-        snprintf(dst[i], 40, "%.*s", k, p);
+        while (k > 8 && p[k] != ' ') k--;
+        if (k <= 8) k = cols;
+        snprintf(dst, 48, "%.*s", k, p);
         p += k;
     }
 }
 
 /* petites barres de signal (10x7 px) : l'icone wifi de art.h est trop haute
-   pour la bande d'etat */
+   pour l'en-tete */
 static void mini_wifi(int x, int y, bool on, int rssi)
 {
     int niv = 0;
@@ -145,13 +141,6 @@ static void mini_wifi(int x, int y, bool on, int rssi)
     if (!on) a_hline(x - 1, x + 9, y + 2, 1);   /* barre = hors ligne */
 }
 
-/* une lettre seule, corps 1 */
-static void g_lettre(int x, int y, char c)
-{
-    char s[2] = { c, 0 };
-    a_text(x, y, 1, s);
-}
-
 /* ---------------------------------------------------------------- */
 /* la page                                                          */
 /* ---------------------------------------------------------------- */
@@ -161,185 +150,111 @@ void tableau_dessine(const tableau_t *t)
     static const char *const JOURS[7] = { "DIM", "LUN", "MAR", "MER", "JEU", "VEN", "SAM" };
     static const char *const MOIS[12] = { "JAN", "FEV", "MAR", "AVR", "MAI", "JUN",
                                           "JUL", "AOU", "SEP", "OCT", "NOV", "DEC" };
-    char b[128], c[64], d[80];
+    char b[128], c[64], d[64], e[64];
 
-    /* ============ en-tete : heure, visage, date, batterie ============ */
+    /* ============ en-tete : l'heure, en tres gros ==================== */
     snprintf(b, sizeof(b), "%02d:%02d", t->heure % 24, t->minute % 60);
-    txt(3, 1, 6, b);                                  /* l'heure, en tres gros */
+    txt(2, 0, 6, b);                                  /* "18:54" : 114 x 30 px */
 
-    draw_kirby(138, 17, 11, 0, t->visage);            /* le compagnon, toujours la */
+    /* la date sur deux lignes, collee a droite : "MER 11" / "NOV". Sur une
+       seule ligne elle venait toucher le dernier chiffre de l'heure. */
+    snprintf(b, sizeof(b), "%s %d",
+             JOURS[(t->sem < 0 || t->sem > 6) ? 0 : t->sem], t->jour);
+    txt_r(197, 0, 2, b);
+    txt_r(197, 13, 2, MOIS[(t->mois < 0 || t->mois > 11) ? 0 : t->mois]);
+    mini_wifi(188, 27, t->wifi, t->rssi);             /* le wifi, sans un mot */
+    a_hline(2, 197, 38, 1);
 
-    snprintf(b, sizeof(b), "%s %d %s",
-             JOURS[(t->sem < 0 || t->sem > 6) ? 0 : t->sem],
-             t->jour, MOIS[(t->mois < 0 || t->mois > 11) ? 0 : t->mois]);
-    txt_r(197, 4, 1, b);                              /* la date */
-
-    if (t->bat_pct >= 0) {
-        snprintf(b, sizeof(b), "BAT %d", t->bat_pct);
-        int x = 197 - (a_text_w(1, b) + 2 + 5);
-        txt(x, 13, 1, b);
-        pct_signe(x + a_text_w(1, b) + 2, 13, 1);
-    } else {
-        txt_r(197, 13, 1, "USB");
-    }
-    a_hline(2, 197, 33, 1);
-
-    /* ============ etat : borne wifi et uptime ======================== */
-    if (t->wifi && t->ssid[0]) {
-        coupe(d, sizeof(d), t->ssid, 14);
-        int w = a_text_w(1, d);
-        mini_wifi(3, 38, true, t->rssi);
-        lab(15, 38, d);
-        if (t->rssi) {
-            snprintf(b, sizeof(b), "%dDB", t->rssi);
-            lab(15 + w + 4, 38, b);
-        }
-    } else {
-        mini_wifi(3, 38, false, 0);
-        lab(15, 38, "HORS LIGNE");
-    }
-    snprintf(b, sizeof(b), "UP %dH%02d", t->uptime_min / 60, t->uptime_min % 60);
-    txt_r(197, 38, 1, b);
-    a_hline(2, 197, 45, 1);
-
-    /* ============ rangee 1 : le ciel ================================= */
+    /* ============ le ciel =========================================== */
     {
-        int y = 49;
-        lab(3, y, "METEO");
+        int y = 42;
         if (t->meteo) {
-            snprintf(b, sizeof(b), "%s", un_chiffre(c, sizeof(c), t->meteo_c));
-            txt(3, y + 7, 3, b);
-            int w = a_text_w(3, b);
-            g_lettre(3 + w + 2, y + 14, 'C');
-            coupe(d, sizeof(d), t->meteo_txt, 11);   /* "PEU NUAGEUX" tient en 11 signes */
-            lab(3 + w + 10, y + 16, d);
+            snprintf(b, sizeof(b), "%sC", un_chiffre(c, sizeof(c), t->meteo_c));
+            txt(3, y, 4, b);                           /* 13.6C en corps 4 */
+            coupe(d, sizeof(d), t->meteo_txt, 12);     /* 94 px : 103..197, la
+                                                          temperature s'arrete a 79 */
+            txt_r(197, y + 4, 2, d);                   /* l'etat du ciel a droite */
         } else {
-            txt(3, y + 7, 3, "--");
-            lab(38, y + 16, "N.D.");
+            txt(3, y, 4, "--");
+            txt_r(197, y + 4, 2, "N.D.");
         }
-        lab(104, y, "DEMAIN");
+        /* demain a gauche, la pluie a droite */
         if (t->dem_min > -900) {
-            snprintf(b, sizeof(b), "%d-%dC", t->dem_min, t->dem_max);
-            txt(104, y + 8, 2, b);
+            snprintf(b, sizeof(b), "DEM %d-%dC", t->dem_min, t->dem_max);
+            txt(3, y + 22, 2, b);
             if (t->dem_pluie >= 0) {
                 char n[16];
                 snprintf(n, sizeof(n), "%d", t->dem_pluie);
-                int wl = a_text_w(1, "PLUIE "), wv = a_text_w(1, n);
-                int x = 197 - (wl + wv + 3 + 6);
-                lab(x, y + 21, "PLUIE");
-                nombre_pct(x + wl, y + 21, 1, t->dem_pluie);
+                int wl = a_text_w(2, "PLUIE"), wv = a_text_w(2, n);
+                int x = 197 - (wl + 6 + wv + 2 + 9);   /* 9 = largeur du signe */
+                txt(x, y + 22, 2, "PLUIE");
+                nombre_pct(x + wl + 6, y + 22, 2, t->dem_pluie);
             }
         } else {
-            txt(104, y + 8, 2, "--");
-            lab(104, y + 21, "N.D.");
+            txt(3, y + 22, 2, "DEM --");
         }
+        /* le capteur interieur, en clair */
+        if (t->capteur)
+            snprintf(b, sizeof(b), "INT %sC %d%%",
+                     un_chiffre(c, sizeof(c), t->temp_int), (int)(t->humi + 0.5f));
+        else
+            snprintf(b, sizeof(b), "INT N.D.");
+        coupe(e, sizeof(e), b, 21);
+        txt(3, y + 36, 2, e);
     }
-    a_hline(2, 197, 78, 1);
+    a_hline(2, 197, 90, 1);
 
-    /* ============ rangee 2 : interieur et batterie =================== */
+    /* ============ la batterie ======================================= */
     {
-        int y = 81;
-        lab(3, y, "INTERIEUR");
-        if (t->capteur) {
-            snprintf(b, sizeof(b), "%s", un_chiffre(c, sizeof(c), t->temp_int));
-            txt(3, y + 8, 2, b);
-            g_lettre(3 + a_text_w(2, b) + 2, y + 13, 'C');
-            nombre_pct(62, y + 8, 2, (int)(t->humi + 0.5f));
-        } else {
-            txt(3, y + 8, 2, "N.D.");
-        }
-        /* qui il est : le stade, la forme et son age */
-        {
-            char e[40] = "";
-            if (t->stade) snprintf(e, sizeof(e), "%s", t->stade);
-            if (t->forme && strcmp(t->forme, "-")) {
-                size_t l = strlen(e);
-                snprintf(e + l, sizeof(e) - l, " %s", t->forme);
-            }
-            if (t->age_j >= 0) {
-                size_t l = strlen(e);
-                snprintf(e + l, sizeof(e) - l, " %dJ", t->age_j);
-            }
-            coupe(d, sizeof(d), e, 23);
-            lab(3, y + 22, d);
-        }
-
-        lab(104, y, "BATTERIE");
+        int y = 94;
         if (t->bat_pct >= 0) {
-            int w = nombre_pct(104, y + 8, 2, t->bat_pct);
-            barre(104 + w + 6, y + 11, 196 - (104 + w + 6), 8, t->bat_pct);
+            int w = nombre_pct(3, y, 4, t->bat_pct);
+            barre(3 + w + 8, y + 2, 196 - (3 + w + 8), 16, t->bat_pct);
         } else {
-            txt(104, y + 8, 2, "USB");
-        }
-        if (t->conso_mw >= 0) {
-            snprintf(b, sizeof(b), "%dMW", t->conso_mw);
-            txt_r(197, y + 22, 1, b);
+            txt(3, y, 4, "USB");                       /* pas de batterie : pas de jauge */
         }
     }
-    a_hline(2, 197, 110, 1);
+    a_hline(2, 197, 116, 1);
 
-    /* ============ rangee 3 : banc et agenda ========================== */
-    {
-        int y = 113;
-        lab(3, y, "SYSTEME");
-        lab(3, y + 8, "CPU");
-        nombre_pct(34, y + 6, 2, t->cpu_pct < 0 ? 0 : t->cpu_pct);
-        snprintf(b, sizeof(b), "RAM %uK", t->ram_libre_k);
-        lab(3, y + 22, b);
-
-        lab(104, y, "AGENDA");
-        if (t->rdv_quand[0]) {
-            coupe(d, sizeof(d), t->rdv_quand, 15);
-            lab(104, y + 8, d);
-            coupe(d, sizeof(d), t->rdv_qui, 15);
-            txt(104, y + 15, 2, d);
-        } else if (t->rappels > 0) {
-            snprintf(b, sizeof(b), "%d RAPPEL%s", t->rappels, t->rappels > 1 ? "S" : "");
-            txt(104, y + 9, 2, b);
-        } else {
-            txt(104, y + 9, 2, "LIBRE");
-        }
-    }
-    a_hline(2, 197, 142, 1);
-
-    /* ============ rangee 4 : le dernier mot et le conseil ============ */
-    {
-        int y = 145;
-        char l1[40], l2[40], l3[40];
-        lab(3, y, "DERNIER MOT");
-        trois_lignes(l1, l2, l3, t->dernier, 23);
-        lab(3, y + 7, l1[0] ? l1 : "-");
-        if (l2[0]) lab(3, y + 14, l2);
-        if (l3[0]) lab(3, y + 21, l3);
-
-        lab(104, y, "CONSEIL");
-        trois_lignes(l1, l2, l3, t->conseil, 23);
-        lab(104, y + 7, l1[0] ? l1 : "-");
-        if (l2[0]) lab(104, y + 14, l2);
-        if (l3[0]) lab(104, y + 21, l3);
-    }
-    a_hline(2, 197, 172, 1);
-
-    /* ============ pied : le compagnon, ses quatre jauges ============ */
-    /* YouTube et le livre ont ete retires le 11/11 : la place sert aux
-       jauges, qui disent ce dont il a besoin maintenant. */
+    /* ============ le compagnon : ses quatre jauges =================== */
     {
         struct { const char *nom; int v; } j[4] = {
-            { "FAIM",  t->faim },  { "BONH",  t->bonheur },
-            { "ENER",  t->energie }, { "SANTE", t->sante }
+            { "FAIM", t->faim },     { "BONH", t->bonheur },
+            { "ENER", t->energie },  { "SANTE", t->sante }
         };
         for (int i = 0; i < 4; i++) {
             int x = (i % 2) ? 104 : 3;
-            int y = (i < 2) ? 176 : 189;
-            lab(x, y, j[i].nom);
-            if (j[i].v < 0)                 /* n.d. : jamais une barre vide */
-                lab(x + 20, y, "-");
-            else {
-                barre(x + 18, y - 1, 44, 8, j[i].v);
-                snprintf(b, sizeof(b), "%d", j[i].v);
-                txt_r(x + 92, y + 1, 1, b);    /* x+92 : la colonne s'arrete a 95/196 */
-            }
+            int y = (i < 2) ? 120 : 137;
+            txt(x, y, 2, j[i].nom);                    /* 4 ou 5 signes : 31 ou 39 px */
+            if (j[i].v < 0) txt(x + 45, y, 2, "-");    /* n.d. : jamais une barre vide */
+            else            barre(x + 45, y, 43, 14, j[i].v);
         }
-        if (t->alarme) txt_r(197, 145, 1, "ALARME 1=STOP");
+    }
+    a_hline(2, 197, 156, 1);
+
+    /* ============ l'agenda ========================================== */
+    if (t->alarme) {
+        txt(3, 160, 3, "ALARME");
+        txt_r(197, 160, 3, "1=STOP");
+    } else if (t->rdv_quand[0]) {
+        coupe(d, sizeof(d), t->rdv_quand, 15);
+        txt(3, 161, 2, d);
+        coupe(d, sizeof(d), t->rdv_qui, 16);
+        txt_r(197, 161, 2, d);
+    } else if (t->rappels > 0) {
+        snprintf(b, sizeof(b), "%d RAPPEL%s", t->rappels, t->rappels > 1 ? "S" : "");
+        txt(3, 161, 2, b);
+    } else {
+        txt(3, 161, 2, "AGENDA LIBRE");
+    }
+
+    /* ============ le dernier mot : deux lignes de corps 2 =========== */
+    /* 24 signes par ligne en corps 2 (24 x 8 - 2 = 190 px) : a 30 le texte
+       touchait le bord droit de la dalle */
+    {
+        char l1[48], l2[48];
+        deux_lignes(l1, l2, t->dernier, 24);
+        txt(3, 176, 2, l1[0] ? l1 : "-");
+        if (l2[0]) txt(3, 187, 2, l2);
     }
 }

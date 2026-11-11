@@ -223,7 +223,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-11-11 page-unique-2"
+#define APP_VER "2026-11-11 gros-caracteres-2"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -3468,20 +3468,16 @@ static void tableau_maitre(void)
     t.jour   = ti.tm_mday;
     t.mois   = ti.tm_mon;
 
-    /* ---- reseau ---- */
+    /* ---- reseau : l'icone de l'en-tete suffit ---- */
     t.wifi = ui_wifi_ok;
-    snprintf(t.ssid, sizeof(t.ssid), "%.*s", (int)sizeof(t.ssid) - 1, wifi_actif);
     {
         wifi_ap_record_t ap;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) t.rssi = ap.rssi;
     }
 
-    /* ---- energie et banc systeme ---- */
-    t.bat_pct     = sys_bat_pct(sys_bat_mv());     /* -1 : USB, pas de batterie */
-    t.conso_mw    = conso_mw();
-    t.uptime_min  = (int)(esp_timer_get_time() / 60000000LL);
-    t.cpu_pct     = sys_cpu10 / 10;
-    t.ram_libre_k = (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
+    /* ---- energie ---- */
+    t.bat_pct  = sys_bat_pct(sys_bat_mv());        /* -1 : USB, pas de batterie */
+    t.conso_mw = conso_mw();
 
     /* ---- capteur interne (SHTC3) ---- */
     t.capteur = ui_shtc_ok;
@@ -3499,19 +3495,13 @@ static void tableau_maitre(void)
 
     /* ---- compagnon : sous verrou, c'est la tache tamagotchi qui le fait vivre ---- */
     if (pet_mux && xSemaphoreTake(pet_mux, pdMS_TO_TICKS(300)) == pdTRUE) {
-        t.stade   = pet_stade_nom(pet_stade(&pet));
-        t.forme   = pet_forme_nom(pet.forme);
-        t.emotion = FAMILLES[current_emotion % FAMILLE_N];
         t.faim    = pet.faim / 4;          /* 400 points = 4 coeurs = 100 % */
         t.bonheur = pet.bonheur / 4;
         t.energie = pet.energie / 4;
         t.sante   = pet_sante(&pet);
-        t.age_j   = (int)(pet.age_s / 86400);
         xSemaphoreGive(pet_mux);
     } else {                               /* verrou occupe : on dit N.D., jamais zero */
-        t.stade = "N.D."; t.forme = ""; t.emotion = "N.D.";
         t.faim = t.bonheur = t.energie = t.sante = -1;
-        t.age_j = -1;
     }
     t.visage = kirby_etat();
 
@@ -3546,8 +3536,6 @@ static void tableau_maitre(void)
                 break;
             }
     }
-    snprintf(t.conseil, sizeof(t.conseil), "%.*s", (int)sizeof(t.conseil) - 1, conseil_txt);
-
     /* youtube et le livre ont ete retires de la page le 11/11 : leurs
        donnees restent dans le firmware (routes /livre, /state) mais ne sont
        plus collectees pour le tableau. */
