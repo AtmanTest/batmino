@@ -180,57 +180,66 @@ def main():
     else:
         ko("tache ecran vivante", f"ui_ticks={d.get('ui_ticks')}")
 
-    # --------------------------------------------------------- 2. les 6 pages
-    print("\n2. une appli par page (docs/features/02-pages.md)")
-    attendu = ["ACCUEIL", "METEO", "RAPPELS", "SYSTEM", "HISTORIQUE", "YOUTUBE"]
+    # --------------------------------------------------- 2. une seule page
+    print("\n2. une seule page (docs/features/02-pages.md)")
     c.cmd("ui 0", r"page=|$^", 4)
     time.sleep(1.5)
-    vus = []
-    for _ in range(6):
-        c.cmd("btn 1", r"essai bouton 1", 12)   # appui simple bouton 1
-        vus.append(c.diag().get("page", "?"))   # l'etat reel, pas le log
-        time.sleep(1.4)                         # une dalle = ~1 s de dessin
-    attendu_tour = attendu[1:] + [attendu[0]]
-    if vus == attendu_tour:
-        ok("bouton 1 fait le tour des %d pages" % len(attendu), " -> ".join(vus))
+    restes = []
+    for _ in range(3):
+        c.cmd("btn 1", r"essai bouton 1", 12)        # appui simple bouton 1
+        restes.append(c.diag().get("page", "?"))
+        time.sleep(1.4)
+    if restes == ["ACCUEIL"] * 3:
+        ok("bouton 1 : le tableau ne tourne plus", " -> ".join(restes))
     else:
-        ko("bouton 1 fait le tour des %d pages" % len(attendu),
-           f"attendu {' -> '.join(attendu_tour)}, vu {' -> '.join(vus)}")
+        ko("bouton 1 : le tableau ne tourne plus", "vu " + " -> ".join(restes))
 
     time.sleep(1.6)
     c.cmd("btn 2", r"essai bouton 2", 12)
     page = c.diag().get("page", "?")
-    if page == attendu[-1]:
-        ok("bouton 2 revient en arriere", page)
+    if page == "ACCUEIL":
+        ok("bouton 2 sur le tableau : aucune page a tourner", page)
     else:
-        ko("bouton 2 revient en arriere", page)
+        ko("bouton 2 sur le tableau : aucune page a tourner", page)
+
+    time.sleep(1.6)
+    c.cmd("btn 2 long", r"essai bouton 2", 12)
+    page = c.diag().get("page", "?")
+    if page == "LIVRE":
+        ok("appui long 2 : ouvre le livre", page)
+    else:
+        ko("appui long 2 : ouvre le livre", page)
 
     time.sleep(1.6)
     c.cmd("btn 1 long", r"essai bouton 1", 12)
     page = c.diag().get("page", "?")
     if page == "ACCUEIL":
-        ok("appui long ramene a l'accueil")
+        ok("appui long ramene au tableau", page)
     else:
-        ko("appui long ramene a l'accueil", page)
+        ko("appui long ramene au tableau", page)
 
-    # ------------------------------------------------- 3. la dalle suit la page
-    print("\n3. la dalle suit bien la page (docs/features/06-ecran-eink.md)")
+    # ---------------------------------------------- 3. la dalle suit le dessin
+    print("\n3. la dalle suit bien le dessin (docs/features/06-ecran-eink.md)")
     images = {}
-    for i, nom in enumerate(attendu):
+    for i, nom in (("0", "ACCUEIL"), ("7", "LIVRE")):
         c.cmd(f"ui {i}", r"page=|$^", 4)
         time.sleep(1.2)
         img = c.fb()
         if img is None:
-            ko(f"image page {nom}", "framebuffer incomplet")
+            ko(f"image {nom}", "framebuffer incomplet")
             continue
         images[nom] = img
         c.png(img, f"/tmp/test_{nom.lower()}.png")
-    if len(set(images.values())) == len(attendu):
-        ok("les %d pages ont %d images differentes" % (len(attendu), len(attendu)),
-           "/tmp/test_accueil.png ... /tmp/test_historique.png")
+    if len(images) == 2 and images["ACCUEIL"] != images["LIVRE"]:
+        ok("le tableau et le livre donnent deux images", "/tmp/test_accueil.png, /tmp/test_livre.png")
     else:
-        ko("les %d pages ont %d images differentes" % (len(attendu), len(attendu)),
-           f"{len(set(images.values()))} images pour {len(images)} pages")
+        ko("le tableau et le livre donnent deux images",
+           f"{len(set(images.values()))} image(s) pour {len(images)} ecran(s)")
+    if "ACCUEIL" in images and images["ACCUEIL"].strip("f"):
+        ok("le tableau est dessine (framebuffer non vide)")
+    elif "ACCUEIL" in images:
+        ko("le tableau est dessine (framebuffer non vide)", "image blanche")
+    c.cmd("ui 0", r"page=|$^", 4)
 
     # ------------------------------------------- 4. l'assistant cree un rappel
     print("\n4. l'assistant cree un rappel (docs/features/04-rappel.md)")

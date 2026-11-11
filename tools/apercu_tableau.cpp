@@ -1,0 +1,84 @@
+/*  apercu_tableau.cpp - rend la page unique sur le PC et ecrit un PNG.
+ *
+ *  g++ -O2 -o /tmp/apercu_tableau tools/apercu_tableau.cpp main/tableau.cpp \
+ *      main/art.cpp main/petart.cpp main/font5.cpp -I main -lm
+ *  /tmp/apercu_tableau plein  /tmp/tableau_plein
+ *  /tmp/apercu_tableau vide   /tmp/tableau_vide
+ *
+ *  Ecrit <sortie>.fb (5000 octets, 1 bit/px) ; fb2png.py en fait une image.
+ */
+#include "art.h"
+#include "tableau.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+static uint8_t fbuf[ART_FB_LEN];
+
+static void ecrit(const char *base)
+{
+    char p[256];
+    snprintf(p, sizeof(p), "%s.fb", base);
+    FILE *f = fopen(p, "wb");
+    if (!f) { perror(p); exit(1); }
+    fwrite(fbuf, 1, ART_FB_LEN, f);
+    fclose(f);
+    printf("%s\n", p);
+}
+
+int main(int argc, char **argv)
+{
+    const char *mode = argc > 1 ? argv[1] : "plein";
+    const char *out = argc > 2 ? argv[2] : "/tmp/tableau";
+
+    tableau_t t;
+    memset(&t, 0, sizeof(t));
+    art_tables_init();
+
+    if (!strcmp(mode, "vide")) {
+        /* tout ce qui peut manquer manque : la page doit rester lisible */
+        t.heure = 7; t.minute = 3;
+        t.sem = 3; t.jour = 11; t.mois = 10;
+        t.wifi = false;
+        t.bat_pct = -1; t.conso_mw = -1; t.uptime_min = 0;
+        t.capteur = false;
+        t.meteo = false; t.dem_min = -999;
+        t.stade = "BEBE"; t.forme = "-"; t.emotion = "calme"; t.age_j = 0;
+        t.faim = t.bonheur = t.energie = t.sante = -1;
+        t.cpu_pct = 0; t.ram_libre_k = 0;
+        t.livre_n = 0;
+    } else {
+        t.heure = 18; t.minute = 54;
+        t.sem = 3; t.jour = 11; t.mois = 10;
+        t.wifi = true;
+        snprintf(t.ssid, sizeof(t.ssid), "MON_RESEAU_SECOURS");
+        t.rssi = -52;
+        t.bat_pct = 36; t.conso_mw = 270; t.uptime_min = 133;
+        t.capteur = true; t.temp_int = 24.6f; t.humi = 41.0f;
+        t.meteo = true; t.meteo_c = 13.6f;
+        snprintf(t.meteo_txt, sizeof(t.meteo_txt), "NUAGEUX");
+        t.dem_min = 9; t.dem_max = 14; t.dem_pluie = 20;
+        t.stade = "ADULTE"; t.forme = "HEROS"; t.emotion = "calme"; t.age_j = 5;
+        t.faim = 100; t.bonheur = 82; t.energie = 64; t.sante = 38;
+        t.cpu_pct = 1; t.ram_libre_k = 228;
+        snprintf(t.rdv_quand, sizeof(t.rdv_quand), "DEMAIN 09:00");
+        snprintf(t.rdv_qui, sizeof(t.rdv_qui), "DENTISTE");
+        snprintf(t.dernier, sizeof(t.dernier),
+                 "Tu as dit que tu voulais ranger l'atelier ce week-end.");
+        snprintf(t.conseil, sizeof(t.conseil),
+                 "Batterie a 36%%, branche le chargeur avant ce soir.");
+        snprintf(t.yt_chaine, sizeof(t.yt_chaine), "@youtube");
+        snprintf(t.yt_video, sizeof(t.yt_video),
+                 "COMMENT CREER UN AQUARIUM PLANTE DE A A Z AVEC SERPADESIGN");
+        t.yt_vues = 1370938UL;
+        snprintf(t.livre, sizeof(t.livre), "FLEURS");
+        t.livre_p = 80; t.livre_n = 456;
+    }
+
+    t.visage = 1;
+    art_begin(fbuf, 0);
+    art_clear();
+    tableau_dessine(&t);
+    ecrit(out);
+    return 0;
+}

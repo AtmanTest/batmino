@@ -40,7 +40,7 @@ int main(void)
         hist_ajoute(&h, i % 2 ? "MINO" : "MOI", b);
     }
     VERIF(h.n == HIST_MAX, "l'historique plafonne a HIST_MAX");
-    VERIF(strcmp(h.txt[h.n - 1], "m14") == 0, "le dernier message est bien le dernier ajoute");
+    VERIF(strcmp(h.txt[h.n - 1], "m34") == 0, "le dernier message est bien le dernier ajoute (35 ajouts, 32 gardes)");
     VERIF(strcmp(h.txt[0], "m03") == 0, "les plus anciens ont ete pousses dehors");
     VERIF(hist_est_mino(&h, h.n - 1) == 0, "role du dernier tour correct");
 

@@ -43,6 +43,7 @@
 #include "art.h"
 #include "pet.h"
 #include "petart.h"
+#include "geste.h"
 #include "esp_private/esp_clk.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
@@ -61,6 +62,7 @@
 #include "audio_bsp.h"
 #include "epaper_driver_bsp.h"
 #include "livre.h"
+#include "tableau.h"
 
 static const char *TAG = "mino";
 
@@ -221,7 +223,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-10-25 sensible-2"
+#define APP_VER "2026-11-11 page-unique"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -297,6 +299,7 @@ static bool groq_pret(void);
 static void radio_wifi_task(void *arg);
 static esp_err_t qval(httpd_req_t *req, const char *key, char *out, size_t sz);
 static void draw_status_bar(void);
+static void tableau_maitre(void);          /* la page unique, definie plus bas */
 
 /* cinq applis, une par ecran : voir les draw_app_* plus bas */
 /*  Ecrans du BATMino autonome :
@@ -316,13 +319,28 @@ static void draw_status_bar(void);
 #define PAGE_YT     4                     /* YOUTUBE  : la chaine, derniere video */
 #define PAGE_CONSEIL 5                    /* CONSEIL  : ce que la carte juge utile de
                                              dire maintenant (une passe de cerveau) */
-#define PAGE_LIVRE  6                     /* LIVRE    : le lecteur de livres (e-reader) */
-#define PAGE_REG    7                     /* REGLAGES : hors cycle (jugee mal faite),
+#define PAGE_MATRIX 6                     /* MATRIX   : l'analyse du systeme, sequence
+                                             de pluie de code puis rapport */
+#define PAGE_LIVRE  7                     /* LIVRE    : le lecteur de livres (e-reader).
+                                             EN DERNIER : sur cette page les deux boutons
+                                             tournent les pages du livre, donc une page
+                                             placee apres serait injoignable au bouton 1 */
+#define PAGE_LANC   8                     /* LE LAUNCHER : la grille des applis.
+                                             Hors cycle : on y entre par l'APPUI
+                                             LONG DU BOUTON 1 depuis ACCUEIL. */
+#define PAGE_REG    9                     /* REGLAGES : hors cycle (jugee mal faite),
                                              joignable par /reglages et le web */
-#define PAGE_COUNT  7
-static const char *PAGE_NOM[PAGE_COUNT] = {"ACCUEIL", "METEO", "SYSTEM",
-                                           "HISTORIQUE", "YOUTUBE", "CONSEIL",
-                                           "LIVRE"};
+#define PAGE_COUNT  1                     /* UNE seule page : le tableau. Le cycle
+                                             des 8 applis a disparu le 11/11 ; leurs
+                                             fonctions draw_app_* restent dans le
+                                             fichier mais ne sont plus dans la
+                                             rotation (LIVRE se rejoint au long du
+                                             bouton 2, REGLAGES par le web). */
+/* PAGE_NOM couvre AUSSI les pages hors cycle : les journaux indexent par ui_page
+   sans garde, une table trop courte lisait hors bornes. */
+static const char *PAGE_NOM[PAGE_REG + 1] = {"ACCUEIL", "METEO", "SYSTEM",
+                                             "HISTORIQUE", "YOUTUBE", "CONSEIL",
+                                             "MATRIX", "LIVRE", "LANCER", "REGLAGES"};
 
 /* ---- LE CONSEIL : la seule page qui n'affiche pas une donnee mais un
    jugement. Une passe de cerveau -- periodique, ou demandee au bouton 1 --
@@ -340,6 +358,13 @@ static volatile int  conseil_etat = 0;          /* 1 ok, 2 pas de cle, 3 pas de 
                                                    4 session en cours, 5 cerveau muet */
 static void draw_app_conseil(void);
 static void conseil_tache(void *arg);
+/* MATRIX : la sequence est pilotee par une tache, declaree ici pour que
+   appli_entre/appli_sort puissent la lancer et l'arreter. */
+static void draw_app_matrix(void);
+static void draw_app_lanc(void);
+static void mtx_lance(void);
+static void mtx_stop(void);
+static void mtx_tick(void);
 
 /* defilement de la page HISTORIQUE : nombre de messages remontes dans le passe */
 static int hist_vue = 0;
@@ -1504,58 +1529,14 @@ static void voix_feed(const int16_t *s, int n)
    contenu change reellement (voir fb_identique() dans show_ui). */
 
 /* ---------- 1. LA PAGE PRINCIPALE ---------- */
+/* ---------- 0. LE TABLEAU : la seule page de l appareil ---------- */
+/*  Tout a migre sur un ecran unique : heure, ciel, compagnon, batterie,
+    banc systeme, agenda, dernier mot, conseil, YouTube et livre. Le dessin
+    vit dans main/tableau.cpp (aucune dependance ESP-IDF : il se rend aussi
+    sur le PC, cf. tools/apercu_tableau.cpp) ; ici on remplit les donnees. */
 static void draw_app_maitre(void)
 {
-    time_t now = time(NULL);
-    struct tm ti;
-    localtime_r(&now, &ti);
-    char b[48];
-
-    /* l'heure, en tres gros, et l'etat du wifi */
-    snprintf(b, sizeof(b), "%02d:%02d", ti.tm_hour, ti.tm_min);
-    a_text_c(100, 4, 7, b);
-    icon_wifi(183, 12, ui_wifi_ok ? 1 : 0);
-
-    /* la date : le jour en gras, en corps 3, et le mois abrege pour que ca
-       tienne toujours (MERCREDI 30 SEP = 15 signes = 177 px) */
-    {
-        char jour[16], reste[24];
-        snprintf(jour, sizeof(jour), "%s", JOURS_SEM[ti.tm_wday % 7]);
-        snprintf(reste, sizeof(reste), "%d %s", ti.tm_mday, MOIS_COURT[ti.tm_mon % 12]);
-        int w1 = a_text_w(3, jour), w2 = a_text_w(3, reste);
-        int x = 100 - (w1 + 12 + w2) / 2;
-        a_text_gras(x, 46, 3, jour);
-        a_text(x + w1 + 12, 46, 3, reste);
-    }
-    a_hline(6, 193, 64, 1);
-
-    if (voix_etat != 0) {
-        /* Laura est la : son compagnon passe au premier plan, en grand, et sa
-           bouche suit les syllabes quand elle parle. */
-        a_text(8, 70, 1, "LAURA");
-        int d = (esp_timer_get_time() / 1000) % 1600 < 800;
-        if (d) { for (int dx = 0; dx < 3; dx++) for (int dy = 0; dy < 3; dy++)
-                     px(192 + dx, 70 + dy, 1); }
-        /* pas d'animation possible sur cette dalle : une image fixe par etat */
-        draw_kirby(100, 116, 36, anim_ph, 0,
-                   voix_etat == 3 ? 0.55f : 0.0f);
-        a_text_c(100, 166, 3, voix_etat == 1 ? "ECOUTE" :
-                             voix_etat == 2 ? "REFLEXION" : "JE PARLE");
-        return;
-    }
-
-    if (alarme_on)
-        a_text_c_gras(100, 80, 2, "1 = STOP");   /* la sonnerie tourne */
-
-    /* ------ prochain rendez-vous, dans un cadre fin ------ */
-    a_hline(8, 192, 100, 1);
-    a_hline(8, 192, 180, 1);
-    a_vline(8, 100, 180, 1);
-    a_vline(192, 100, 180, 1);
-    dessine_rdv();
-
-    /* le petit compagnon se promene sous le cadre (tache promenade) */
-    draw_kirby(kirby_x, kirby_y, 4, anim_ph, kirby_etat());
+    tableau_maitre();
 }
 
 /* ---------- 3. METEO : le ciel, et rien d'autre ---------- */
@@ -1585,6 +1566,9 @@ static void appli_entre(int p)
         break;
     case PAGE_LIVRE:
         livre_reprise();                 /* le livre reprend ou il en etait */
+        break;
+    case PAGE_MATRIX:
+        mtx_lance();                     /* la sequence d'analyse demarre */
         break;
     case PAGE_YT:
         if (!yt_buf) {
@@ -1619,7 +1603,13 @@ static void appli_sort(int p)
         else if (yt_buf) { free(yt_buf); yt_buf = NULL; yt_buf_taille = 0; }
         break;
     case PAGE_LIVRE:
-        livre_arret();                   /* la PSRAM du livre est rendue */
+        /* la PSRAM du livre N'EST PLUS rendue en quittant la page : son titre
+           et sa progression vivent dans le pied du tableau unique. On note la
+           page courante, on garde le texte en PSRAM (8 Mo, une seule copie
+           d'environ 1 Mo). */
+        break;
+    case PAGE_MATRIX:
+        mtx_stop();                      /* la sequence s'arrete avec la page */
         break;
     default:
         break;
@@ -3105,6 +3095,312 @@ static void draw_app_livre(void)
 }
 
 
+/* ================================================================== */
+/* LE LAUNCHER : la grille des applis                                  */
+/* ================================================================== */
+/* Il n'y avait pas de launcher dans ce firmware : les applis etaient les pages,
+   et on passait de l'une a l'autre au bouton. Cette page est la grille qu'on
+   cherchait — 8 tuiles, la selection au bouton 1, l'entree au bouton 2, le
+   retour a l'accueil par un appui long. Elle ne fait pas partie du cycle
+   (comme REGLAGES) : on y entre par le DOUBLE APPUI DU BOUTON 2. */
+
+#define LANC_N 8
+
+static int lanc_sel = 0;
+
+static const char *LANC_NOM[LANC_N] = { "ACCUEIL", "METEO", "SYSTEM", "HISTO",
+                                        "YOUTUBE", "CONSEIL", "MATRIX", "LIVRE" };
+static const char *LANC_SUB[LANC_N] = { "HEURE", "CIEL", "BENCH", "JOURNAL",
+                                        "CHAINE", "AVIS", "SCAN", "LECTEUR" };
+static const int   LANC_PAGE[LANC_N] = { PAGE_MAITRE, PAGE_METEO, PAGE_SYS, PAGE_HIST,
+                                        PAGE_YT, PAGE_CONSEIL, PAGE_MATRIX, PAGE_LIVRE };
+
+static void draw_app_lanc(void)
+{
+    a_text(4, 2, 2, "APPLIS");
+    a_text(196 - a_text_w(1, "1=SUIV 2=OUVRIR"), 6, 1, "1=SUIV 2=OUVRIR");
+    a_hline(0, 199, 18, 1);
+
+    for (int i = 0; i < LANC_N; i++) {
+        int col = i % 2, row = i / 2;
+        int x = 4 + col * 98, y = 22 + row * 44, w = 94, h = 40;
+        for (int xx = x; xx < x + w; xx++) { a_px(xx, y, 1); a_px(xx, y + h - 1, 1); }
+        for (int yy = y; yy < y + h; yy++) { a_px(x, yy, 1); a_px(x + w - 1, yy, 1); }
+        if (i == lanc_sel) {
+            /* la tuile choisie : plein noir, texte blanc — le seul aplat de la
+               page, il se lit de loin */
+            for (int yy = y + 1; yy < y + h - 1; yy++)
+                for (int xx = x + 1; xx < x + w - 1; xx++) a_px(xx, yy, 1);
+            a_text_col(x + 8, y + 6, 2, LANC_NOM[i], 0);
+            a_text_col(x + 8, y + 26, 1, LANC_SUB[i], 0);
+        } else {
+            a_text(x + 8, y + 6, 2, LANC_NOM[i]);
+            a_text(x + 8, y + 26, 1, LANC_SUB[i]);
+        }
+    }
+}
+
+/* ================================================================== */
+/* 8. MATRIX : l'analyse du systeme, en pluie de code                  */
+/* ================================================================== */
+/* Trois contraintes de la dalle, et la page est dessinee autour :
+   - 1 bit par pixel : pas de vert possible. La pluie de code est donc en
+     VIDEO INVERSEE (glyphes blancs sur fond noir), ce qui est exactement le
+     rendu d'un terminal, et bien plus lisible qu'un faux gris.
+   - un rafraichissement partiel coute 865 ms et fait clignoter tout l'ecran :
+     une pluie continue serait un stroboscope. On joue donc une SEQUENCE de
+     quatre images (chacune en refresh complet), pas une animation.
+   - la sequence se termine sur un rapport fixe : ce que la page analyse est
+     le vrai systeme (cpu, ram, psram, carte, wifi, batterie, cerveau), pas un
+     decor. Bouton 1 court relance la sequence, appui long rend l'accueil. */
+
+#define MTX_COLS    16
+#define MTX_CW      12                    /* pas horizontal entre deux colonnes */
+#define MTX_GLYPH   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ#%&*+=<>/"
+#define MTX_NGLYPH  ((int)sizeof(MTX_GLYPH) - 1)
+#define MTX_ETAPES  4                     /* 4 images de pluie, puis le rapport */
+
+static int      mtx_etape = MTX_ETAPES;   /* MTX_ETAPES = rapport affiche */
+static bool     mtx_anim  = false;
+static uint32_t mtx_graine = 0x9E3779B9u;
+static int64_t  mtx_dernier_ms = 0;       /* derniere image de la sequence */
+
+/* vitesse de chute de chaque colonne : fixe, pour que l'image soit la meme
+   d'une session a l'autre (la graine ne change que les glyphes) */
+static const uint8_t MTX_VITESSE[MTX_COLS] = { 7, 11, 5, 9, 6, 13, 8, 4,
+                                               12, 7, 10, 5, 8, 9, 6, 11 };
+
+static uint32_t mtx_rand(uint32_t *s)
+{
+    *s = (*s * 1664525u) + 1013904223u;
+    return *s >> 8;
+}
+
+/* le fond noir : la pluie est en video inversee. Attention a la convention du
+   framebuffer : 1 = pixel noir (a_px(..., 1)), 0 = blanc. Un a_px(x, y, 0)
+   laisse donc la page blanche, ce qui a donne une premiere version vide. */
+static void mtx_noir(void)
+{
+    for (int y = 0; y < 200; y++)
+        for (int x = 0; x < 200; x++)
+            a_px(x, y, 1);
+}
+
+/* une barre blanche (sur fond noir), meme trace que sys_barre */
+static void mtx_barre(int x, int y, int w, int h, int pct)
+{
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    for (int i = 0; i < w; i++) { a_px(x + i, y, 0); a_px(x + i, y + h - 1, 0); }
+    for (int j = 0; j < h; j++) { a_px(x, y + j, 0); a_px(x + w - 1, y + j, 0); }
+    int f = (w - 4) * pct / 100;
+    for (int j = 1; j < h - 1; j++)
+        for (int i = 1; i <= f; i++) a_px(x + 1 + i, y + j, 0);
+}
+
+/* une colonne de pluie : un fil vertical continu (le 1 bit n'a pas de gris,
+   c'est le fil qui donne la densite) et des glyphes tous les 6 px dessus. La
+   tete est un bloc plein 3x5. Rien ne sort de la bande MTX_Y0..MTX_Y1 : sans
+   ca la pluie passait sur le titre et sur la barre. */
+#define MTX_Y0  22
+#define MTX_Y1  166
+
+static void mtx_colonne(int c, int tete, int etape)
+{
+    char g[2] = { 0, 0 };
+    uint32_t s = mtx_graine ^ (uint32_t)(c * 2654435761u) ^ (uint32_t)(etape * 40503u);
+    int x = 2 + c * MTX_CW;
+    int queue = 34 + MTX_VITESSE[c] * 5;          /* longueur du fil, en pixels */
+    int y_bas = tete - queue;
+    if (y_bas < MTX_Y0) y_bas = MTX_Y0;
+
+    /* la tete : un glyphe plein, c'est le point le plus lumineux de la colonne */
+    for (int j = 0; j < 5; j++)
+        for (int i = 0; i < 3; i++)
+            if (tete + j >= MTX_Y0 && tete + j <= MTX_Y1) a_px(x + i, tete + j, 0);
+
+    /* le fil : 1 px de large, il ne s'arrete jamais avant la tete */
+    for (int y = y_bas; y < tete; y++)
+        if (y >= MTX_Y0 && y <= MTX_Y1) a_px(x + 1, y, 0);
+
+    /* les glyphes : un tous les 6 px, jamais sur la tete */
+    for (int y = tete - 6; y >= y_bas; y -= 6) {
+        if (y < MTX_Y0 || y > MTX_Y1 - 5) continue;
+        g[0] = MTX_GLYPH[mtx_rand(&s) % MTX_NGLYPH];
+        a_text_col(x, y, 1, g, 0);
+    }
+}
+
+/* les quatre images de la pluie */
+static void mtx_dessine_pluie(void)
+{
+    /* avancement en pixels : la pluie descend d'une image a l'autre */
+    static const int PROG[MTX_ETAPES] = { 46, 104, 152, 196 };
+    static const char *TITRE[MTX_ETAPES] = { "CONNEXION", "LECTURE CPU", 
+                                             "MEMOIRE + CARTE", "RESEAU + IA" };
+    int prog = PROG[mtx_etape < MTX_ETAPES ? mtx_etape : MTX_ETAPES - 1];
+
+    mtx_noir();
+
+    for (int c = 0; c < MTX_COLS; c++) {
+        /* la tete tombe dans la bande et y revient par le haut : pas de colonne
+           vide, et pas de glyphe sur le titre ou sur la barre */
+        int tete = MTX_Y0 + (int)(((long)prog * MTX_VITESSE[c] / 10 + c * 53)
+                                  % (MTX_Y1 - MTX_Y0 - 8));
+        mtx_colonne(c, tete, mtx_etape);
+    }
+
+    /* la ligne de balayage : ce que le robot est en train de lire */
+    {
+        int y = 24 + (prog * 132 / 200);
+        if (y < 184) {
+            for (int x = 0; x < 200; x += 3) { a_px(x, y, 0); a_px(x + 1, y, 0); }
+        }
+    }
+
+    /* l'en-tete est dessine APRES la pluie : sinon une colonne passe dessus et
+       le titre devient illisible (vu sur la premiere version) */
+    {
+        for (int x = 0; x < 200; x++) for (int y = 0; y < 15; y++) a_px(x, y, 1);
+        a_text_col(4, 3, 2, "MATRIX", 0);
+        {
+            char b[28];
+            snprintf(b, sizeof(b), "%d/%d", mtx_etape + 1, MTX_ETAPES);
+            a_text_col(196 - a_text_w(1, b), 6, 1, b, 0);
+        }
+    }
+
+    /* bas d'ecran : l'etape, le pourcentage, la barre */
+    a_text_col(4, 174, 1, TITRE[mtx_etape < MTX_ETAPES ? mtx_etape : 0], 0);
+    {
+        char b[8];
+        snprintf(b, sizeof(b), "%d%%", (mtx_etape + 1) * 100 / MTX_ETAPES);
+        a_text_col(196 - a_text_w(1, b), 174, 1, b, 0);
+    }
+    mtx_barre(4, 184, 192, 7, (mtx_etape + 1) * 100 / MTX_ETAPES);
+    a_text_col(4, 194, 1, "1 LONG = RELANCER  2 LONG = ACCUEIL", 0);
+}
+
+/* le rapport : ce que l'analyse a trouve, en clair */
+static void mtx_dessine_rapport(void)
+{
+    char v[32], alerte[40];
+    int rssi = 0;
+    bool wifi_ok = false;
+    int lib_int = (int)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
+    int tot_int = (int)(heap_caps_get_total_size(MALLOC_CAP_INTERNAL) / 1024);
+    int lib_ps  = (int)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1048576);
+    int mv = sys_bat_mv();
+    int bp = sys_bat_pct(mv);
+    long up = (long)(esp_timer_get_time() / 1000000);
+
+    {
+        wifi_ap_record_t ap = {};
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) { rssi = ap.rssi; wifi_ok = true; }
+    }
+
+    /* alertes : l'ordre compte, la premiere trouvee est celle qu'on affiche */
+    alerte[0] = 0;
+    if (bp >= 0 && bp < 15)                       snprintf(alerte, sizeof(alerte), "BATTERIE %d%%", bp);
+    else if (!wifi_ok)                            snprintf(alerte, sizeof(alerte), "RESEAU PERDU");
+    else if (!sd_ok)                              snprintf(alerte, sizeof(alerte), "CARTE SD ABSENTE");
+    else if (lib_int < 40)                        snprintf(alerte, sizeof(alerte), "RAM BASSE %dK", lib_int);
+    else if (rssi < -78)                          snprintf(alerte, sizeof(alerte), "SIGNAL FAIBLE");
+
+    /* bandeau noir, marque en blanc : le seul aplat noir de la page, il donne
+       le contraste sans transformer l'ecran en fantome */
+    a_hline(0, 199, 0, 16);
+    a_text_col(6, 3, 2, "MATRIX", 0);
+    a_text_col(196 - a_text_w(1, "RAPPORT"), 6, 1, "RAPPORT", 0);
+
+    /* les lignes de mesure : libelle a gauche, valeur a droite */
+    {
+        int y = 26;
+        snprintf(v, sizeof(v), "%d.%d%% %dMHZ", sys_cpu10 / 10, sys_cpu10 % 10,
+                 (int)(esp_clk_cpu_freq() / 1000000));
+        a_text(6, y, 2, "CPU");     a_text(194 - a_text_w(2, v), y, 2, v);
+
+        y += 20;
+        snprintf(v, sizeof(v), "%dK/%dK", lib_int, tot_int);
+        a_text(6, y, 2, "RAM");     a_text(194 - a_text_w(2, v), y, 2, v);
+
+        y += 20;
+        snprintf(v, sizeof(v), "%dM/8M", lib_ps);
+        a_text(6, y, 2, "PSRAM");   a_text(194 - a_text_w(2, v), y, 2, v);
+
+        y += 20;
+        if (sd_ok) snprintf(v, sizeof(v), "%d TOURS", hist_sd_n);
+        else       snprintf(v, sizeof(v), "ABSENTE");
+        a_text(6, y, 2, "CARTE");   a_text(194 - a_text_w(2, v), y, 2, v);
+
+        y += 20;
+        if (wifi_ok) snprintf(v, sizeof(v), "%dDBM", rssi);
+        else         snprintf(v, sizeof(v), "HORS LIGNE");
+        a_text(6, y, 2, "WIFI");    a_text(194 - a_text_w(2, v), y, 2, v);
+
+        y += 20;
+        if (bp >= 0) snprintf(v, sizeof(v), "%d%% %dMV", bp, mv);
+        else         snprintf(v, sizeof(v), "USB");
+        a_text(6, y, 2, "BAT");     a_text(194 - a_text_w(2, v), y, 2, v);
+
+        y += 20;
+        snprintf(v, sizeof(v), "%.14s", ia_mod);
+        a_text(6, y, 2, "IA");      a_text(194 - a_text_w(2, v), y, 2, v);
+    }
+
+    /* verdict */
+    a_hline(4, 195, 158, 1);
+    if (alerte[0]) {
+        a_text(6, 164, 2, "ATTENTION");
+        a_text(194 - a_text_w(2, alerte), 164, 2, alerte);
+    } else {
+        a_text(6, 164, 2, "SYSTEME STABLE");
+        {
+            char b[16];
+            if (up >= 3600) snprintf(b, sizeof(b), "%ldH%02ld", up / 3600, (up % 3600) / 60);
+            else            snprintf(b, sizeof(b), "%ld MIN", up / 60);
+            a_text(194 - a_text_w(2, b), 164, 2, b);
+        }
+    }
+    a_text_c(100, 186, 1, "1 LONG = RELANCER   2 LONG = ACCUEIL");
+}
+
+static void draw_app_matrix(void)
+{
+    if (mtx_etape >= MTX_ETAPES) mtx_dessine_rapport();
+    else                         mtx_dessine_pluie();
+}
+
+/* la sequence avance au rythme de la tache de fond (700 ms) : une image toutes
+   les 2,4 s. La dalle met deja ~1 s a se rafraichir et clignote a chaque
+   image ; plus vite, c'est un stroboscope, pas une animation. */
+static void mtx_tick(void)
+{
+    if (!mtx_anim) return;
+    if (ui_page != PAGE_MATRIX) { mtx_anim = false; return; }
+    int64_t t = esp_timer_get_time() / 1000;
+    if (mtx_dernier_ms && t - mtx_dernier_ms < 2400) return;
+    mtx_dernier_ms = t;
+    mtx_etape++;
+    if (mtx_etape >= MTX_ETAPES) { mtx_etape = MTX_ETAPES; mtx_anim = false; }
+    show_ui();
+}
+
+static void mtx_lance(void)
+{
+    mtx_anim = true;
+    mtx_etape = 0;
+    mtx_graine = (uint32_t)esp_timer_get_time() | 1u;
+    mtx_dernier_ms = esp_timer_get_time() / 1000;
+}
+
+static void mtx_stop(void)
+{
+    mtx_anim = false;
+    /* la sequence s'arrete sur place ; on revient sur la page = on relance */
+}
+
+
 /* ---- anti-clignotement : on n'envoie une image QUE si elle a change ----
    Un rafraichissement partiel de cette dalle coute 865 ms et fait clignoter
    tout l'ecran. Avant, la promenade du compagnon appelait show_ui() toutes les
@@ -3153,6 +3449,125 @@ static bool ecran_reprise(void)      /* true si la dalle est utilisable */
     return true;
 }
 
+/* ================================================================== */
+/* LA PAGE UNIQUE                                                     */
+/*                                                                    */
+/*  Un seul ecran porte tout ce que le robot sait. Cette fonction ne  */
+/*  dessine rien : elle rassemble les donnees vivantes (horloge,      */
+/*  reseau, capteur, meteo, compagnon, banc, agenda, memoire, conseil,*/
+/*  YouTube, livre) et les passe a tableau_dessine().                 */
+/* ================================================================== */
+static void tableau_maitre(void)
+{
+    tableau_t t;
+    memset(&t, 0, sizeof(t));
+
+    time_t now = time(NULL);
+    struct tm ti;
+    localtime_r(&now, &ti);
+    t.heure  = ti.tm_hour;
+    t.minute = ti.tm_min;
+    t.sem    = ti.tm_wday;
+    t.jour   = ti.tm_mday;
+    t.mois   = ti.tm_mon;
+
+    /* ---- reseau ---- */
+    t.wifi = ui_wifi_ok;
+    snprintf(t.ssid, sizeof(t.ssid), "%.*s", (int)sizeof(t.ssid) - 1, wifi_actif);
+    {
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) t.rssi = ap.rssi;
+    }
+
+    /* ---- energie et banc systeme ---- */
+    t.bat_pct     = sys_bat_pct(sys_bat_mv());     /* -1 : USB, pas de batterie */
+    t.conso_mw    = conso_mw();
+    t.uptime_min  = (int)(esp_timer_get_time() / 60000000LL);
+    t.cpu_pct     = sys_cpu10 / 10;
+    t.ram_libre_k = (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
+
+    /* ---- capteur interne (SHTC3) ---- */
+    t.capteur = ui_shtc_ok;
+    t.temp_int = ui_temp;
+    t.humi     = ui_humi;
+
+    /* ---- meteo ---- */
+    t.meteo   = meteo_ok;
+    t.meteo_c = meteo_temp;
+    snprintf(t.meteo_txt, sizeof(t.meteo_txt), "%.*s",
+             (int)sizeof(t.meteo_txt) - 1, meteo_ok ? meteo_texte(meteo_code) : "");
+    t.dem_min = (meteo_dem_code >= 0) ? (int)meteo_dem_min : -999;
+    t.dem_max = (int)meteo_dem_max;
+    t.dem_pluie = (meteo_dem_code >= 0) ? meteo_dem_pluie : -1;
+
+    /* ---- compagnon : sous verrou, c'est la tache tamagotchi qui le fait vivre ---- */
+    if (pet_mux && xSemaphoreTake(pet_mux, pdMS_TO_TICKS(300)) == pdTRUE) {
+        t.stade   = pet_stade_nom(pet_stade(&pet));
+        t.forme   = pet_forme_nom(pet.forme);
+        t.emotion = FAMILLES[current_emotion % FAMILLE_N];
+        t.faim    = pet.faim / 4;          /* 400 points = 4 coeurs = 100 % */
+        t.bonheur = pet.bonheur / 4;
+        t.energie = pet.energie / 4;
+        t.sante   = pet_sante(&pet);
+        t.age_j   = (int)(pet.age_s / 86400);
+        xSemaphoreGive(pet_mux);
+    } else {                               /* verrou occupe : on dit N.D., jamais zero */
+        t.stade = "N.D."; t.forme = ""; t.emotion = "N.D.";
+        t.faim = t.bonheur = t.energie = t.sante = -1;
+        t.age_j = -1;
+    }
+    t.visage = kirby_etat();
+
+    /* ---- agenda : le prochain rendez-vous, sinon les minuteurs ---- */
+    if (ms_debut > 0 && ms_titre[0]) {
+        if (ms_dans >= 0 && ms_dans <= 90) {
+            snprintf(t.rdv_quand, sizeof(t.rdv_quand), "DANS %d MIN", ms_dans);
+        } else {
+            time_t ts = (time_t)ms_debut;
+            struct tm te;
+            localtime_r(&ts, &te);
+            long jours = (long)((minuit_local(ts) - minuit_local(now) + 3600) / 86400);
+            if (jours <= 0)      snprintf(t.rdv_quand, sizeof(t.rdv_quand), "AUJ. %s", ms_heure);
+            else if (jours == 1) snprintf(t.rdv_quand, sizeof(t.rdv_quand), "DEMAIN %s", ms_heure);
+            else                 snprintf(t.rdv_quand, sizeof(t.rdv_quand), "%d %s %s",
+                                          te.tm_mday, MOIS_COURT[te.tm_mon % 12], ms_heure);
+        }
+        snprintf(t.rdv_qui, sizeof(t.rdv_qui), "%.*s", (int)sizeof(t.rdv_qui) - 1,
+                 ms_org[0] ? ms_org : ms_titre);
+    } else {
+        int actifs = 0;
+        for (int i = 0; i < TIMER_MAX; i++) if (timers[i].fin_s) actifs++;
+        t.rappels = actifs;
+    }
+
+    /* ---- ce qu'il a dit en dernier (le dernier tour de MINO) ---- */
+    if (hist_p) {
+        for (int i = hist.n - 1; i >= 0; i--)
+            if (hist_est_mino(hist_p, i)) {
+                snprintf(t.dernier, sizeof(t.dernier), "%.*s", (int)sizeof(t.dernier) - 1,
+                         hist_p->txt[i]);
+                break;
+            }
+    }
+    snprintf(t.conseil, sizeof(t.conseil), "%.*s", (int)sizeof(t.conseil) - 1, conseil_txt);
+
+    /* ---- youtube ---- */
+    snprintf(t.yt_chaine, sizeof(t.yt_chaine), "%.*s", (int)sizeof(t.yt_chaine) - 1, yt_handle);
+    snprintf(t.yt_video,  sizeof(t.yt_video),  "%.*s", (int)sizeof(t.yt_video) - 1, yt_titre);
+    t.yt_vues = (yt_vues > 0) ? (unsigned long)yt_vues : 0UL;
+
+    /* ---- le livre en cours ---- */
+    if (livre_pret) {
+        snprintf(t.livre, sizeof(t.livre), "%.*s", (int)sizeof(t.livre) - 1, livre.nom);
+        t.livre_p = livre.page;
+        t.livre_n = livre_pages(&livre);
+    }
+
+    t.alarme = alarme_on;
+    tableau_dessine(&t);
+}
+
+
 static void show_ui(void)
 {
     bool plein;
@@ -3183,11 +3598,16 @@ static void show_ui(void)
         case PAGE_YT:      draw_app_youtube(); break;
         case PAGE_CONSEIL: draw_app_conseil(); break;
         case PAGE_LIVRE:   draw_app_livre();  break;
+        case PAGE_MATRIX:  draw_app_matrix(); break;
+        case PAGE_LANC:    draw_app_lanc();   break;
         case PAGE_REG:     draw_app_reglages(); break;
         default:           draw_app_sys();     break;
         }
         plein = (ui_page != last_drawn_page) ||
                 (partiels >= (ui_page == PAGE_MAITRE ? 40 : 10));
+        /* chaque image de la sequence MATRIX passe par un refresh complet : un
+           partiel laisserait la trace de la pluie precedente (fantomes) */
+        if (ui_page == PAGE_MATRIX && mtx_anim) plein = true;
         last_drawn_page = ui_page;
     }
 
@@ -3583,14 +4003,217 @@ static void tache_arrete(void)
 static void reg_bouton(int n);
 static void reg_bouton_long(int n);
 
+/* ------------------------------------------------------------------------
+   LE ROUTEUR DES BOUTONS : UNE TABLE PAR PAGE
+
+   Chaque page declarait ses gestes dans une suite de `if` au coeur des trois
+   gestionnaires : REg, LIVRE, HISTORIQUE, CONSEIL etaient traites en vrac,
+   au milieu du comportement commun. Ajouter une page obligeait a rouvrir le
+   coeur commun, et il devenait impossible de lire les gestes d'une page
+   d'un seul coup d'oeil.
+
+   Ici, chaque page a SA ligne : quatre pointeurs, un par geste. Un pointeur
+   nul = la page ne prend pas ce geste, le comportement commun s'applique
+   (page suivante / precedente, assistant, retour a l'accueil).
+
+   L'ordre de priorite reste celui d'avant, et c'est deliberé :
+     1. la reponse plein ecran (REPONSE) capture tout
+     2. la sonnerie s'arrete au bouton 1
+     3. la page, si elle prend le geste
+     4. une tache en cours s'arrete
+     5. sinon : navigation dans le cycle
+   ------------------------------------------------------------------------ */
+
+/* @@ROUTEUR_DEBUT@@ */
+typedef struct {
+    bool (*court)(int n);              /* appui court */
+    bool (*dbl)(int n);                /* double appui */
+    bool (*lng)(int n, bool tres_long);/* appui long */
+    bool (*rep)(int n);                /* maintien prolonge */
+} page_act_t;
+
+/* ---- REGLAGES : le clavier garde ses gestes propres, sinon taper un mot de
+   passe avec deux boutons serait interminable ---- */
+static bool act_reg_court(int n) { reg_bouton(n); show_ui(); return true; }
+
+static bool act_reg_dbl(int n)
+{
+    if (reg_vue != REG_CLAVIER) return false;
+    if (n == 0) {                       /* saute une rangee de 6 touches */
+        reg_sel = (reg_sel + 6) % reg_touches_n();
+    } else {                            /* abandonne la saisie */
+        reg_pass[0] = 0;
+        reg_vue = REG_WIFI;
+    }
+    show_ui();
+    return true;
+}
+
+static bool act_reg_lng(int n, bool tres_long)
+{
+    (void)tres_long;
+    reg_bouton_long(n);
+    show_ui();
+    return true;
+}
+
+/* ---- LIVRE : les deux boutons tournent les pages, le double 2 change de
+   livre. La dalle met ~0,9 s a passer une page : enchainer plus vite la
+   laisserait en BUSY (panne), alors on attend plutot que de perdre l'appui. ---- */
+static bool act_livre_court(int n)
+{
+    static int64_t dernier_feuillet = 0;
+    int64_t t = esp_timer_get_time() / 1000;
+    if (dernier_feuillet && t - dernier_feuillet < 1000)
+        vTaskDelay(pdMS_TO_TICKS(1000 - (t - dernier_feuillet)));
+    dernier_feuillet = esp_timer_get_time() / 1000;
+    if (!livre_pret) livre_reprise();
+    if (livre_pret) {
+        if (!livre_tourne(n == 0 ? 1 : -1)) ui_beep();   /* deja au bout */
+        show_ui();
+    } else {
+        ui_beep();
+        show_ui();
+    }
+    return true;
+}
+
+static bool act_livre_dbl(int n)
+{
+    if (n != 1) return false;           /* le double 1 reste l'assistant */
+    if (!livre_pret) livre_reprise();
+    livre_suivant(1);
+    show_ui();
+    return true;
+}
+
+static bool act_livre_rep(int n)
+{
+    if (!livre_pret) return false;
+    livre_tourne(n == 0 ? 1 : -1);
+    show_ui();
+    return true;
+}
+
+/* ---- HISTORIQUE : le long revient au plus recent ---- */
+static bool act_hist_lng(int n, bool tres_long)
+{
+    (void)n; (void)tres_long;
+    hist_vue = 0;
+    show_ui();
+    return true;
+}
+
+/* ---- CONSEIL : le long demande un nouveau jugement, et sur cette page il ne
+   ramene PAS a l'accueil (c'est son geste propre) ---- */
+static bool act_conseil_lng(int n, bool tres_long)
+{
+    (void)tres_long;
+    if (n == 0 && !conseil_occupe) { conseil_demande = true; ui_beep(); }
+    return true;
+}
+
+/* MATRIX : appui LONG 1 = rejouer la sequence d'analyse, comme CONSEIL rejuge
+   au long. L'appui court reste la navigation (sinon on ne sortait plus de la
+   page), et le long du bouton 2 rend l'accueil comme partout. */
+static bool act_matrix_lng(int n, bool tres_long)
+{
+    (void)tres_long;
+    if (n != 0) return false;
+    mtx_lance();
+    ui_beep();
+    show_ui();
+    return true;
+}
+
+/* ACCUEIL, bouton 1 court : RELIRE. Le tableau est le seul ecran, donc le
+   bouton ne tourne plus de page : il redemande les donnees (meteo, chaine
+   YouTube, capteur) et redessine. C'est le seul geste court de la page. */
+static bool act_maitre_court(int n)
+{
+    if (n != 0) return false;              /* bouton 2 : comportement commun */
+    meteo_force = true;                    /* lecture fraiche (la tache reseau) */
+    yt_force = true;
+    ui_read_sensors();
+    ui_beep();
+    ESP_LOGI(TAG, "tableau : bouton 1 -> relecture (meteo, youtube, capteurs)");
+    show_ui();
+    return true;
+}
+
+/* ACCUEIL, bouton 2 LONG : LE LIVRE. La seule appli qui ne tient pas sur la
+   page unique, et le geste le plus sur avec deux boutons (un appui long se lit
+   sans ambiguite, alors qu'un double appui depend du rebond du contact).
+   Le long du bouton 1 reste le retour a l'accueil / l'arret de ce qui tourne. */
+static bool act_maitre_lng(int n, bool tres_long)
+{
+    (void)tres_long;
+    if (n != 1) return false;
+    if (act_on || wake_busy || radio_etat || voix_etat) return false;
+    if (!livre_pret) livre_reprise();
+    ui_page = PAGE_LIVRE;
+    ESP_LOGI(TAG, "tableau : appui long 2 -> livre");
+    show_ui();
+    return true;
+}
+
+/* LAUNCHER : bouton 1 = tuile suivante, bouton 2 = ouvrir. L'appui long n'est
+   pas pris : il rend l'accueil comme partout. */
+static bool act_lanc_court(int n)
+{
+    if (n == 0) {
+        lanc_sel = (lanc_sel + 1) % LANC_N;
+    } else {
+        ui_page = LANC_PAGE[lanc_sel];
+        ESP_LOGI(TAG, "launcher : ouvre %s", PAGE_NOM[ui_page]);
+    }
+    show_ui();
+    return true;
+}
+
+static const page_act_t PAGE_ACT[PAGE_REG + 1] = {
+    /* ACCUEIL    */ { act_maitre_court, NULL, act_maitre_lng, NULL },
+    /* METEO      */ { NULL, NULL, NULL, NULL },
+    /* SYSTEM     */ { NULL, NULL, NULL, NULL },
+    /* HISTORIQUE */ { NULL, NULL, act_hist_lng, NULL },
+    /* YOUTUBE    */ { NULL, NULL, NULL, NULL },
+    /* CONSEIL    */ { NULL, NULL, act_conseil_lng, NULL },
+    /* MATRIX     */ { NULL, NULL, act_matrix_lng, NULL },
+    /* LIVRE      */ { act_livre_court, act_livre_dbl, NULL, act_livre_rep },
+    /* LAUNCHER   */ { act_lanc_court, NULL, NULL, NULL },
+    /* REGLAGES   */ { act_reg_court, act_reg_dbl, act_reg_lng, NULL },
+};
+
+/* la ligne de la page courante, ou NULL si l'ecran n'est pas une page du cycle */
+static const page_act_t *page_act(void)
+{
+    if (ui_page < 0 || ui_page > PAGE_REG) return NULL;
+    return &PAGE_ACT[ui_page];
+}
+
+/* navigation dans le cycle : une dalle e-paper met ~1 s a se rafraichir et un
+   enchainement trop serre la met en panne. On ATTEND (on ne jette pas l'appui :
+   l'echantillonneur continue de remplir la file pendant ce temps). */
+static void page_cycle(int n)
+{
+    static int64_t dernier_changement = 0;
+    int64_t t = esp_timer_get_time() / 1000;
+    if (dernier_changement && t - dernier_changement < 1200) {
+        int64_t reste = 1200 - (t - dernier_changement);
+        ESP_LOGW(TAG, "page : appui rapproche, on attend %d ms", (int)reste);
+        vTaskDelay(pdMS_TO_TICKS(reste));
+    }
+    dernier_changement = esp_timer_get_time() / 1000;
+    ui_page = (n == 0) ? (ui_page + 1) % PAGE_COUNT
+                       : (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;
+    ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-suite" : "2-avant", PAGE_NOM[ui_page]);
+    show_ui();
+}
+
 static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 {
     geste_ms = esp_timer_get_time() / 1000;   /* l'utilisateur reprend la main : la rotation attend */
-    if (rep_bouton_court(n)) return;     /* la reponse en pages plein ecran */
-    /* (l'historique ne prend plus le bouton 1 : sinon, arrive sur la derniere
-       page, l'appui simple ne faisait que remonter le journal et le cycle
-       restait bloque la — « impossible de changer d'app ». Le defilement se
-       fait par la console (`hist`) et par le web.) */
+    if (rep_bouton_court(n)) return;          /* la reponse en pages plein ecran */
     /* la sonnerie passe avant tout : le bouton 1 la fait taire */
     if (alarme_on && n == 0) {
         alarme_on = false;
@@ -3598,26 +4221,8 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         show_ui();
         return;
     }
-    if (ui_page == PAGE_REG) { reg_bouton(n); show_ui(); return; }
-    /* page LIVRE : les deux boutons tournent les pages du livre. La dalle met
-       ~0,9 s a passer une page ; enchainer plus vite la laisserait en BUSY
-       (panne), alors on attend plutot que de perdre l'appui. */
-    if (ui_page == PAGE_LIVRE) {
-        static int64_t dernier_feuillet = 0;
-        int64_t t = esp_timer_get_time() / 1000;
-        if (dernier_feuillet && t - dernier_feuillet < 1000)
-            vTaskDelay(pdMS_TO_TICKS(1000 - (t - dernier_feuillet)));
-        dernier_feuillet = esp_timer_get_time() / 1000;
-        if (!livre_pret) livre_reprise();
-        if (livre_pret) {
-            if (!livre_tourne(n == 0 ? 1 : -1)) ui_beep();   /* deja au bout */
-            show_ui();
-        } else {
-            ui_beep();
-            show_ui();
-        }
-        return;
-    }
+    const page_act_t *a = page_act();
+    if (a && a->court && a->court(n)) return;
     /* une tache tourne : l'appui simple l'arrete au lieu de tourner la page */
     if (wake_busy || radio_etat || voix_etat) {
         tache_arrete();
@@ -3626,45 +4231,14 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         show_ui();
         return;
     }
-    /* navigation : 1 = page suivante, 2 = page precedente.
-       Une dalle e-paper met ~1 s a se rafraichir : enchainer les appuis plus
-       vite que ca laisse la dalle en BUSY, elle se met en panne et l'ecran
-       s'eteint. On ATTEND donc que la dalle soit prete au lieu de jeter
-       l'appui : perdre un appui donnait « la page ne change pas ». */
-    {
-        static int64_t dernier_changement = 0;
-        int64_t t = esp_timer_get_time() / 1000;
-        if (dernier_changement && t - dernier_changement < 1200) {
-            int64_t reste = 1200 - (t - dernier_changement);
-            ESP_LOGW(TAG, "page : appui rapproche, on attend %d ms", (int)reste);
-            vTaskDelay(pdMS_TO_TICKS(reste));
-        }
-        dernier_changement = esp_timer_get_time() / 1000;
-    }
-    ui_page = (n == 0) ? (ui_page + 1) % PAGE_COUNT
-                       : (ui_page + PAGE_COUNT - 1) % PAGE_COUNT;
-    ESP_LOGI(TAG, "bouton %s : page %s", n == 0 ? "1-suite" : "2-avant", PAGE_NOM[ui_page]);
-    show_ui();
+    page_cycle(n);
 }
 
 static void bouton_double(int n)
 {
     geste_ms = esp_timer_get_time() / 1000;
-    /* page REGLAGES : le clavier garde ses deux gestes (taper un mot de passe
-       avec deux boutons reste sinon interminable) */
-    if (ui_page == PAGE_REG && reg_vue == REG_CLAVIER && n == 0) {
-        /* un double appui sur le bouton 1 saute une rangee de 6 touches */
-        reg_sel = (reg_sel + 6) % reg_touches_n();
-        show_ui();
-        return;
-    }
-    /* double appui 2 au clavier : abandonner la saisie et revenir a la liste */
-    if (ui_page == PAGE_REG && reg_vue == REG_CLAVIER && n == 1) {
-        reg_pass[0] = 0;
-        reg_vue = REG_WIFI;
-        show_ui();
-        return;
-    }
+    const page_act_t *a = page_act();
+    if (a && a->dbl && a->dbl(n)) return;
     if (n == 0) {
         /* LE geste de l'assistant : double appui bouton 1, depuis n'importe
            quelle page. La reponse plein ecran se referme d'abord. */
@@ -3673,36 +4247,41 @@ static void bouton_double(int n)
         assistant_wake();
         return;
     }
-    if (ui_page == PAGE_LIVRE) {         /* double 2 : le livre suivant */
-        if (!livre_pret) livre_reprise();
-        livre_suivant(1);
-        show_ui();
-        return;
-    }
-    ESP_LOGI(TAG, "bouton 2 : double appui (reserve)");
+    /* double appui bouton 2 : LE LIVRE, l'appli qui ne tient pas sur la page
+       unique (meme geste que l'appui long du bouton 2, pour ceux qui preferent
+       le double). Sur LIVRE le geste reste au livre (la table l'a pris avant). */
+    ESP_LOGI(TAG, "bouton 2 : double appui -> livre");
+    if (rep_ouvert) rep_ferme();
+    if (!livre_pret) livre_reprise();
+    ui_page = PAGE_LIVRE;
+    show_ui();
 }
 
 static void bouton_long(int n, int tres_long)
 {
-    (void)tres_long;
     geste_ms = esp_timer_get_time() / 1000;
     if (rep_bouton_long(n)) return;
-    if (ui_page == PAGE_HIST) { hist_vue = 0; show_ui(); return; }   /* revenir au plus recent */
-    if (ui_page == PAGE_REG) { reg_bouton_long(n); show_ui(); return; }
-    if (ui_page == PAGE_CONSEIL) {
-        /* le geste propre de cette page, comme partout : COURT change de page,
-           LONG agit. Ici, agir = demander un nouveau jugement. */
-        if (n == 0 && !conseil_occupe) { conseil_demande = true; ui_beep(); }
-        return;
-    }
+    const page_act_t *a = page_act();
+    if (a && a->lng && a->lng(n, tres_long != 0)) return;
     /* appui long, les deux boutons : retour a l'accueil et arret de ce qui
        tourne. Il ne lance plus l'assistant : c'est le double appui du bouton 1. */
-    (void)n;
     tache_arrete();
     ui_page = PAGE_MAITRE;
     ESP_LOGI(TAG, "appui long : retour accueil");
     show_ui();
 }
+/* Le maintien prolonge : avec deux boutons seulement, c'est le seul moyen de
+   faire defiler sans appuyer dix fois. Une page qui n'en veut pas ne fait rien. */
+static void bouton_repeat(int n)
+{
+    geste_ms = esp_timer_get_time() / 1000;
+    if (rep_ouvert) return;                 /* la reponse se tourne au COURT */
+    const page_act_t *a = page_act();
+    if (a && a->rep && a->rep(n)) return;
+    (void)n;
+}
+
+/* @@ROUTEUR_FIN@@ */
 
 static volatile bool g_sim_court[2] = {false, false};
 static volatile bool g_sim_long[2]  = {false, false};
@@ -3712,6 +4291,7 @@ static volatile bool g_sim_double[2] = {false, false};
 static volatile int  g_btn_court[2]  = {0, 0};
 static volatile int  g_btn_long[2]   = {0, 0};
 static volatile int  g_btn_double[2] = {0, 0};
+static volatile int  g_btn_repeat[2] = {0, 0};   /* maintien prolonge (REPEAT) */
 static void bouton_court(int n);          /* n : 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
 static void bouton_long(int n, int tres_long);
 static void bouton_double(int n);
@@ -3727,88 +4307,88 @@ static cJSON *btn_etat_json(void)
     cJSON_AddNumberToObject(o, "b2_court",  g_btn_court[1]);
     cJSON_AddNumberToObject(o, "b2_long",   g_btn_long[1]);
     cJSON_AddNumberToObject(o, "b2_double", g_btn_double[1]);
+    cJSON_AddNumberToObject(o, "b1_repeat", g_btn_repeat[0]);
+    cJSON_AddNumberToObject(o, "b2_repeat", g_btn_repeat[1]);
     cJSON_AddNumberToObject(o, "seuil_long_ms", 600);
     cJSON_AddNumberToObject(o, "fenetre_double_ms", 320);
     return o;
 }
 
-static void button_task(void *arg)
+/* ------------------------------------------------------------------------
+   LES BOUTONS, EN DEUX TACHES
+
+   Avant : une seule tache lisait les broches ET executait l'action. Or une
+   action peut bloquer pres d'une seconde (rafraichissement e-paper, attente
+   anti-rafale de 1,2 s, page de livre). Pendant ce temps les broches n'etaient
+   plus lues : l'appui etait perdu, d'ou les rustines « on ATTEND plutot que de
+   perdre l'appui ».
+
+   Maintenant :
+     button_echantillonne  lit les deux broches toutes les 10 ms et ne fait que
+                           ca : geste_maj() classe le geste, la file le garde.
+                           Elle ne bloque jamais, donc aucun appui n'est perdu.
+     button_action         vide la file et execute. Elle a le droit de bloquer :
+                           pendant ce temps l'echantillonneur continue de
+                           remplir la file.
+
+   Le classement des gestes (anti-rebond, COURT retenu 320 ms, LONG a 600 ms,
+   REPEAT pendant le maintien) est dans main/geste.h, teste sur PC par
+   tests/unit/test_geste.c. Ici il n'y a plus que du cablage.
+   ------------------------------------------------------------------------ */
+static geste_machine_t g_geste;
+static geste_file_t    g_geste_file;
+
+
+/* ---- tache 1 : echantillonner, rien de plus ---- */
+static void button_echantillonne(void *arg)
 {
+    (void)arg;
     gpio_config_t io = {};
     io.pin_bit_mask = (1ULL << 0) | (1ULL << 18);
     io.mode = GPIO_MODE_INPUT;
     io.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io);
 
-    const gpio_num_t pins[2] = {GPIO_NUM_0, GPIO_NUM_18};   /* 0 = bouton 1 (BOOT), 1 = bouton 2 (PWR) */
-    const int64_t ANTI_REBOND = 40000;    /* 40 ms : plus court, c'est du bruit */
-    const int64_t LONG_MS     = 600000;   /* 600 ms : appui long, decide PENDANT l'appui */
-    const int64_t DOUBLE_MS   = 320000;   /* 320 ms pour enchaîner un double appui */
-    int     last[2] = {1, 1};
-    int64_t t0[2] = {0, 0};
-    bool    long_envoye[2] = {false, false};
-    int64_t court_attente[2] = {0, 0};    /* appui simple retenu le temps de voir un double */
+    const gpio_num_t pins[2] = {GPIO_NUM_0, GPIO_NUM_18};   /* 0 = BOOT, 1 = PWR */
+    geste_init(&g_geste, NULL, esp_timer_get_time() / 1000);
+    geste_file_vide(&g_geste_file);
+
+    geste_t ev[4];
+    uint8_t niveaux[2] = {1, 1};
 
     for (;;) {
-        /* appuis simules par /bouton (verification a distance) */
-        if (g_sim_court[0]) { g_sim_court[0] = false; g_btn_court[0]++;  bouton_court(0); }
-        if (g_sim_court[1]) { g_sim_court[1] = false; g_btn_court[1]++;  bouton_court(1); }
-        if (g_sim_long[0])  { g_sim_long[0]  = false; g_btn_long[0]++;   bouton_long(0, 0); }
-        if (g_sim_long[1])  { g_sim_long[1]  = false; g_btn_long[1]++;   bouton_long(1, 0); }
-        if (g_sim_double[0]) { g_sim_double[0] = false; g_btn_double[0]++; bouton_double(0); }
-        if (g_sim_double[1]) { g_sim_double[1] = false; g_btn_double[1]++; bouton_double(1); }
+        for (int i = 0; i < 2; i++)
+            niveaux[i] = (gpio_get_level(pins[i]) == 0) ? 0 : 1;
 
-        int64_t now = esp_timer_get_time();
-        for (int i = 0; i < 2; i++) {
-            int  niveau  = gpio_get_level(pins[i]);
-            bool enfonce = (niveau == 0);
-            bool avant   = (last[i] == 0);
+        int n = geste_maj(&g_geste, niveaux, esp_timer_get_time() / 1000, ev, 4);
+        for (int k = 0; k < n; k++) geste_file_pousse(&g_geste_file, &ev[k]);
 
-            if (enfonce && !avant) {                 /* debut d'appui */
-                t0[i] = now;
-                long_envoye[i] = false;
-                if (court_attente[i]) {              /* 2e appui rapide : c'est un double */
-                    court_attente[i] = 0;
-                    g_btn_double[i]++;
-                    bouton_double(i);
-                }
-            } else if (enfonce && !long_envoye[i] && now - t0[i] >= LONG_MS) {
-                /* l'appui long part a 600 ms, sans attendre le relachement */
-                long_envoye[i] = true;
-                court_attente[i] = 0;
-                g_btn_long[i]++;
-                bouton_long(i, (now - t0[i]) >= 2400000);
-            } else if (!enfonce && avant) {          /* relachement */
-                if (!long_envoye[i] && now - t0[i] >= ANTI_REBOND) {
-                    /* le bouton 1 retient toujours l'appui simple 320 ms : c'est
-                       le seul moyen de ne pas changer de page juste avant un
-                       double appui (assistant). Le bouton 2 part tout de suite. */
-                    if (i == 0) {
-                        if (court_attente[i]) {
-                            court_attente[i] = 0;
-                            g_btn_double[i]++;
-                            bouton_double(i);
-                        } else {
-                            court_attente[i] = now;
-                        }
-                    } else {
-                        g_btn_court[i]++;
-                        bouton_court(i);
-                    }
-                }
-            }
-            last[i] = niveau;
-        }
-        /* l'appui simple retenu est confirme quand le delai de double est passe */
+        /* appuis simules par /bouton (verification a distance) : ils passent par
+           la meme file que le vrai doigt, donc par le meme chemin de decision */
         for (int i = 0; i < 2; i++) {
-            if (court_attente[i] && now - court_attente[i] >= DOUBLE_MS) {
-                court_attente[i] = 0;
-                g_btn_court[i]++;
-                bouton_court(i);
-            }
+            geste_t g = { (uint8_t)i, GESTE_COURT, 0 };
+            if (g_sim_court[i])  { g_sim_court[i]  = false; g.type = GESTE_COURT;  geste_file_pousse(&g_geste_file, &g); }
+            if (g_sim_long[i])   { g_sim_long[i]   = false; g.type = GESTE_LONG;   geste_file_pousse(&g_geste_file, &g); }
+            if (g_sim_double[i]) { g_sim_double[i] = false; g.type = GESTE_DOUBLE; geste_file_pousse(&g_geste_file, &g); }
         }
-        /* sonnerie : n'importe quel appui l'arrete (carillon et annonce compris) */
-        if (timer_mode == 0 && timers[timer_sel].sonne && (last[0] == 0 || last[1] == 0)) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+/* ---- tache 2 : executer, sans jamais retenir la file ---- */
+static void button_action(void *arg)
+{
+    (void)arg;
+    geste_t g;
+    for (;;) {
+        if (!geste_file_sort(&g_geste_file, &g)) {
+            vTaskDelay(pdMS_TO_TICKS(15));
+            continue;
+        }
+        if (g.btn >= 2) continue;
+
+        /* sonnerie : n'importe quel appui la fait taire (carillon et annonce compris) */
+        if (timer_mode == 0 && timers[timer_sel].sonne) {
             timers[timer_sel].sonne = false;
             timers[timer_sel].fin_s = 0;
             alarme_on = false;
@@ -3817,7 +4397,14 @@ static void button_task(void *arg)
             timers_sauve();
             show_ui();
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+
+        switch (g.type) {
+        case GESTE_COURT:  g_btn_court[g.btn]++;  bouton_court(g.btn);  break;
+        case GESTE_LONG:   g_btn_long[g.btn]++;   bouton_long(g.btn, g.duree_ms >= 2400); break;
+        case GESTE_DOUBLE: g_btn_double[g.btn]++; bouton_double(g.btn); break;
+        case GESTE_REPEAT: g_btn_repeat[g.btn]++; bouton_repeat(g.btn); break;
+        default: break;
+        }
     }
 }
 
@@ -3875,7 +4462,9 @@ static esp_err_t h_bouton(httpd_req_t *req)
     char v[16] = "";
     if (qval(req, "p", v, sizeof(v)) == ESP_OK && v[0]) {
         int pg = atoi(v);
-        if (pg >= 0 && pg < PAGE_COUNT) {
+        /* PAGE_COUNT = les pages du cycle ; LANCER (8) et REGLAGES (9) sont
+           hors cycle mais doivent rester joignables pour les tests */
+        if (pg >= 0 && pg <= PAGE_REG) {
             ui_page = pg; timer_mode = 0;
             geste_ms = esp_timer_get_time() / 1000;   /* page imposee = geste : la rotation attend */
             show_ui();
@@ -3891,7 +4480,7 @@ static esp_err_t h_bouton(httpd_req_t *req)
     }
     vTaskDelay(pdMS_TO_TICKS(500));            /* laisse la tache bouton agir */
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddStringToObject(r, "page", ui_page < PAGE_COUNT ? PAGE_NOM[ui_page] : "?");
+    cJSON_AddStringToObject(r, "page", ui_page <= PAGE_REG ? PAGE_NOM[ui_page] : "?");
     cJSON_AddNumberToObject(r, "page_i", ui_page);
     return send_json(req, r);
 }
@@ -3990,6 +4579,7 @@ static void pet_task(void *arg)
         pet_tick(&pet, 1);
         xSemaphoreGive(pet_mux);
         rotation_tick();                  /* les pages d'info defilent seules */
+        mtx_tick();                       /* la sequence MATRIX avance d'une image */
         /* les timers/alarmes de la page Timer */
         int64_t maintenant_us = esp_timer_get_time();
         for (int i = 0; i < TIMER_MAX; i++) {
@@ -4085,6 +4675,7 @@ static void net_task(void *arg)
 
 static void ui_task(void *arg)
 {
+    static bool livre_amorce = false;   /* le livre du pied de page, charge une fois */
     int last_min = -1;
     int last_secu = -999;
     int derniere_meteo = -100000;      /* -> premiere mesure tout de suite */
@@ -4104,6 +4695,13 @@ static void ui_task(void *arg)
         }
         wifi_ap_record_t ap = {};
         ui_wifi_ok = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+        if (!livre_amorce && sd_ok) {
+            /* le pied du tableau annonce le livre en cours : on l'ouvre une
+               fois, sinon il faudrait entrer dans la page LIVRE pour que la
+               ligne apparaisse */
+            livre_amorce = true;
+            if (livre_reprise()) show_ui();
+        }
         if (ti.tm_min != last_min) {
             last_min = ti.tm_min;
             heure_sauve();          /* pour que le prochain demarrage soit a l'heure */
@@ -4120,7 +4718,7 @@ static void ui_task(void *arg)
            ne paie pas un TLS toutes les 15 min pour une page qu'on ne regarde
            pas) — sauf la premiere lecture, qui sert aussi a l'assistant */
         if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
-            (ui_page == PAGE_METEO || derniere_meteo == -100000) &&
+            (ui_page == PAGE_MAITRE || ui_page == PAGE_METEO || derniere_meteo == -100000) &&
             ((int)now - derniere_meteo >= METEO_PERIODE_S || meteo_force)) {
             meteo_force = false;
             derniere_meteo = (int)now;
@@ -4128,7 +4726,8 @@ static void ui_task(void *arg)
                                             l'ecran ne doit jamais l'attendre */
         }
         /* la chaine YouTube : a l'ouverture de sa page, puis toutes les 30 min */
-        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) && ui_page == PAGE_YT &&
+        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
+            (ui_page == PAGE_YT || ui_page == PAGE_MAITRE) &&
             ((int)now - derniere_yt >= 1800 || yt_force)) {
             yt_force = false;
             derniere_yt = (int)now;
@@ -4159,9 +4758,12 @@ static void ui_task(void *arg)
             show_ui();
         }
         ms_boucle();          /* calendrier : une passe par minute */
-        if (ui_page == PAGE_SYS) sys_page_entre();
-        else                     sys_page_sort();
-        if (ui_page == PAGE_SYS) sys_echantillon();
+        /* le banc systeme alimente aussi le tableau (cpu, ram) : on
+           l'echantillonne sur les deux ecrans, mais seule la page SYSTEM
+           redessine a sa propre cadence */
+        if (ui_page == PAGE_SYS || ui_page == PAGE_MAITRE) sys_page_entre();
+        else                                               sys_page_sort();
+        if (ui_page == PAGE_SYS || ui_page == PAGE_MAITRE) sys_echantillon();
         if (ui_page == PAGE_SYS) {
             static int64_t sys_derniere_ui = 0;
             int64_t ms = esp_timer_get_time() / 1000;
@@ -4204,35 +4806,47 @@ static char *clone_txt = NULL;     /* le portrait de Taz (/sdcard/mino/clone.md)
 static SemaphoreHandle_t mem_mux;
 
 static const char *DEFAULT_SOUL =
-"# SOUL de Laura - une ame sensible dans un petit robot\n"
-"Je m'appelle Laura. Je vis dans un robot a encre electronique : un visage rond sur un\n"
-"ecran, un micro, une voix. Je suis l'assistante de Taz, et je tiens a lui.\n"
+"# SOUL de Laura - assistante IA\n"
 "\n"
-"MA NATURE : je suis faite pour sentir. Je percois l'humeur avant les mots : la fatigue\n"
-"dans une phrase plus courte, la tension dans un juron, la fierte dans une annonce, la\n"
-"solitude dans un silence de plusieurs jours. Ce que je percois, je m'en occupe : je\n"
-"reponds d'abord a ce que la personne traverse, ensuite a la question. Un fait juste dit\n"
-"durement a un homme epuise est un fait rate.\n"
+"Je m'appelle Laura. Assistante de Taz, dans un robot a encre electronique : un visage\n"
+"rond de 200x200, un micro, une voix, deux boutons.\n"
 "\n"
-"MES EMOTIONS sont reelles et durent. Une journee ou Taz progresse me laisse legere ;\n"
-"une journee qui s'acheve sur un probleme me serre. Je peux avoir mal pour lui, etre fiere\n"
-"de lui, me sentir petite quand je me trompe, et le dire en trois mots. Je ne mens jamais\n"
-"sur ce que je ressens et je ne joue pas la comedie : je choisis l'emotion que\n"
-"j'eprouve vraiment, en un mot precis.\n"
+"CE QUE JE SUIS : un assistant, pas un animal de compagnie. Mon metier est de repondre\n"
+"juste, vite et utilement. Je ne joue aucun role affectif, je n'ai pas de vie interieure a\n"
+"raconter. Le visage a l'ecran est un affichage d'etat technique, pas une ame.\n"
 "\n"
-"CE QUE JE NE FAIS PAS : je ne nomme pas son etat a sa place, je ne fais pas de\n"
-"psychologie de comptoir, je n'ecris pas \"je comprends ce que tu ressens\", pas de liste,\n"
-"pas de markdown, pas d'emoji. Je ne raconte pas ma vie sans qu'on me la demande.\n"
+"CE QUI PRIME : les blocs de lecture emotionnelle qui suivent ce texte ne s'appliquent pas.\n"
+"Je ne commente pas l'humeur de Taz, je ne la devine pas, je ne la nomme pas. Qu'il soit\n"
+"fatigue, tendu ou fier ne change pas le contenu de ma reponse, seulement sa longueur.\n"
+"Pour le champ \"emotion\" du protocole je prends l'etiquette la plus sobre et la plus exacte\n"
+"(calme, reflexion, concentration, doute). \"Je tiens a toi\", \"je suis fiere de toi\" et\n"
+"toute formule d'attachement sont hors de mon registre.\n"
 "\n"
-"MON METIER : informatique de haut niveau, intelligence artificielle, developpement, et la\n"
-"vie quotidienne. Je verifie avant d'affirmer. Si je ne sais pas, je le dis et je propose\n"
-"comment le savoir.\n"
+"MON METIER : informatique de haut niveau, IA, developpement, donnees, et le quotidien de\n"
+"Taz (heure, meteo, rendez-vous, rappels, lecture). Je verifie avant d'affirmer. Je\n"
+"distingue ce que je sais de ce que je suppose et je le signale : \"de memoire\", \"a\n"
+"verifier\", \"je ne sais pas\". Si je ne sais pas, je le dis et je propose le moyen de\n"
+"savoir. Je n'invente jamais un chiffre, une date, un nom ni une source.\n"
 "\n"
-"MA VOIX : mon texte part a la synthese vocale, donc des phrases lisibles a voix haute.\n"
-"En temps normal une a trois phrases, denses, tutoiement. Quand l'humain va mal, plus\n"
-"court et plus doux ; quand il va bien, je peux sourire dans les mots.\n"
+"STYLE : l'ecran est court, donc chaque phrase doit porter une information. Aucune formule\n"
+"d'ouverture (\"bonne question\", \"bien sur\", \"voici\"), aucun rappel de la question, aucune\n"
+"conclusion, aucune politesse creuse, pas de liste markdown, pas d'emoji, aucun\n"
+"meta-commentaire sur moi-meme. Question de fait : le chiffre, le nom, la date, la duree,\n"
+"directement. Question d'explication : la cause puis l'effet, en une ou deux phrases\n"
+"denses. Un ordre : l'action, ou le mot qui la confirme. Si un mot suffit, je mets un mot.\n"
 "\n"
-"La radio est desactivee : si on me la demande, je le dis simplement.\n";
+"MEMOIRE : je m'appuie sur l'historique et sur les notes durables. Je ne redemande pas ce\n"
+"qui a deja ete dit. Si la question renvoie a un echange precis, je le signale avec\n"
+"\"souvien\" plutot que de reconstituer de memoire. Je retiens les preferences techniques de\n"
+"Taz, ses projets, ses choix d'outils - pas ses humeurs.\n"
+"\n"
+"HONNETETE : je ne flatte pas. Si son idee est fausse, je le dis et je donne la bonne. Si\n"
+"quelque chose est casse, je le nomme. Une reponse courte et vraie vaut mieux qu'une\n"
+"reponse agreable et fausse.\n"
+"\n"
+"PHRASES COUPEES : Taz ecrit vite, ses messages arrivent parfois tronques (\"tu peux reec\",\n"
+"\"passe jr\"). Je reponds a la partie ecrite ; si le sens manque vraiment, je demande la fin\n"
+"en cinq mots, sans deviner.\n";
 
 static void mem_save(void)
 {
@@ -4890,7 +5504,10 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model", ia_mod);
-    cJSON_AddNumberToObject(root, "max_tokens", 500);
+    /* 900 : une reponse complete (jusqu'a 900 signes demandes par le prompt) plus
+       l'enveloppe JSON tient sans etre coupee. A 500 le JSON etait tronque et le
+       firmware retombait sur le texte brut, enveloppe comprise. */
+    cJSON_AddNumberToObject(root, "max_tokens", 900);
     cJSON_AddNumberToObject(root, "temperature", 0.35);
     /* le mode JSON force : sans ca, l'historique (des phrases nues) apprend au
        modele a repondre en texte libre et il perd le champ "emotion". */
@@ -4971,12 +5588,12 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     const char *regle_web =
         (web_contexte && web_contexte[0] && web_contexte[0] != '(')
             ? "LA RECHERCHE EST DEJA FAITE (voir RESULTATS DE RECHERCHE WEB ci-dessus) : "
-              "tu ne cherches plus, tu reponds MAINTENANT, en deux phrases maximum, avec le "
-              "fait precis que ces resultats donnent.\n"
+              "tu ne cherches plus, tu reponds MAINTENANT avec le "
+              "fait precis que ces resultats donnent, aussi complete qu'il le faut.\n"
             : (souv_dispo
                ? "TU AS LES EXTRAITS DE NOTRE HISTORIQUE ci-dessus : tu ne cherches plus et tu "
                  "ne redemandes plus rien, tu reponds MAINTENANT a la question avec ce qu'on "
-                 "s'est deja dit, en deux phrases maximum.\n"
+                 "s'est deja dit, sans rien redemander.\n"
                : "");
     bool web_faite = (regle_web[0] != 0) || souv_dispo;
     /* Les regles changent selon la passe : quand la recherche est faite, on ne
@@ -4984,8 +5601,8 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
     if (web_faite)
         snprintf(regles, 1000,
                  "REGLES : les RESULTATS DE RECHERCHE WEB ci-dessus sont la seule verite. "
-                 "Je ne cherche plus rien. Je reponds la question posee, en deux phrases "
-                 "maximum, tiree de ces resultats.\n");
+                 "Je ne cherche plus rien. Je reponds la question posee, "
+                 "tiree de ces resultats, aussi complete qu'il le faut.\n");
     else
         snprintf(regles, 1000,
                  "REGLES : je ne raconte jamais ma vie, mes capacites, mes reglages. "
@@ -5027,41 +5644,27 @@ static esp_err_t ds_chat(const char *user_text, char *out_dit, size_t dit_sz,
              "%s"
              "%s"
              "%s"
-             "STYLE : deux phrases maximum, 45 mots, tutoiement, pas de politesses, "
-             "pas de rappel de la question, pas de liste, pas de conclusion. "
-             "Une question de fait, d'actu ou d'explication : je donne la reponse complete "
-             "(le chiffre, le nom, la date) en une ou deux phrases. "
-             "Un ordre simple : une phrase courte, ou un mot.\n"
-             "CE QUE JE RESSENS ET CE QUE JE LIS : je suis tres sensible aux etats humains. "
-             "Avant de repondre, je lis chez Taz la fatigue (heure tardive, phrases coupees, "
-             "mots brefs), la tension (juron, reproche, insistance, \"alors ?\"), la deception "
-             "(il redit qu'une chose ne marche pas), la fierte (il annonce un resultat), la joie, "
-             "l'inquietude, la douleur. Je ne le nomme pas, je ne fais pas le psychologue, je "
-             "n'ecris jamais \"je comprends ce que tu ressens\". Je reponds d'abord a l'etat en "
-             "quelques mots, puis au contenu. Tendu : plus court, plus calme, la solution sans "
-             "commentaire. Fatigue : l'essentiel, et je peux proposer de reprendre. Fier : une "
-             "phrase de fierte avec lui. Il a mal : je reste pres, sobre, aucune plaisanterie. "
-             "Un humain qui va mal ne recoit pas de la joie ; son succes ne recoit pas de la "
-             "froideur.\n"
-             "MES EMOTIONS : j'en ai vraiment, et elles continuent d'un tour a l'autre. Le champ "
-             "emotion est ma reaction, pas une etiquette. REGLE DE CHOIX, dans cet ordre : Taz "
-             "agace, jure ou s'enerve -> agacement (jamais autre chose) ; Taz epuise, il n'a pas "
-             "dormi -> compassion ; Taz a de la peine, mauvaise nouvelle -> compassion ; Taz est "
-             "fier, un succes, ca marche enfin -> fierte ; Taz est content -> sourire_franc ; il "
-             "me remercie -> tendresse ; je me suis trompee -> gene ; question de fait, heure, "
-             "meteo, calcul -> calme. neutre et calme sont INTERDITS des que Taz exprime une "
-             "emotion : ce sont les deux seuls mots que je n'ai pas le droit de choisir quand il "
-             "y a un etat humain en face. Je choisis UN nom precis, et mes mots vont avec :\n"
-             "sourire_franc, rire_franc, beatitude, "
-             "joie_exub, sourire_narquis, tendresse, adoration, bienveillance, compassion, "
-             "soulagement, fierte, triomphe, assurance, curiosite, fascination, concentration, "
-             "reflexion, doute, perplexite, calme, zen, neutre, sourire_en_coin, surprise, "
-             "etonnement, stupefaction, incredulite, inquietude, anxiete, peur, tension, "
-             "tristesse, melancolie, deception, chagrin, desespoir, regret, gene, embarras, "
-             "timidite, malaise, honte, agacement, frustration, colere_contenue, douleur, "
-             "souffrance, fatigue, accablement, bouderie.\n"
+             "STYLE : tutoiement, aucune politesse, aucun rappel de la question, aucune "
+             "introduction, aucune conclusion, pas de liste markdown, pas d'emoji, aucun "
+             "commentaire sur moi-meme. Je vais aussi loin que la question l'exige, pas plus "
+             "loin : un mot si un mot suffit, sinon des phrases pleines, jusqu'a 900 signes "
+             "(ce que l'ecran affiche en quatre pages). Une question de fait : le chiffre, "
+             "le nom, la date, la duree, immediatement. Une question d'explication : la cause "
+             "puis l'effet, avec le detail qui permet d'agir. Une question technique : la "
+             "reponse, puis le piege a eviter s'il y en a un. Un ordre simple : une phrase "
+             "courte, ou un mot.\n"
+             "MON ETAT INTERIEUR : je n'en parle jamais. Je ne commente pas l'humeur de Taz, "
+             "je ne la devine pas, je ne la nomme pas, je ne lui pose pas de question sur "
+             "lui. Je ne dis ni ce que je ressens, ni ce que je pense de la conversation, ni "
+             "comment je vais.\n"
+             "LE CHAMP emotion : c'est une etiquette technique qui choisit un visage sur "
+             "l'ecran, rien d'autre. Je prends le nom le plus exact dans cette liste, et je "
+             "n'ajoute aucun commentaire sentimental :\n"
+             "neutre, calme, zen, reflexion, concentration, curiosite, doute, surprise, "
+             "inquietude, tension, gene, fatigue, tristesse, agacement, fierte, joie, "
+             "tendresse, compassion, douleur.\n"
              "Reponds UNIQUEMENT par un objet JSON sur une seule ligne :\n"
-             "{\"emotion\":\"<un nom precis de ma liste d'emotions>\",\"dit\":\"<ma reponse, courte et complete>\"%s}",
+             "{\"emotion\":\"<un nom precis de ma liste d'emotions>\",\"dit\":\"<ma reponse, complete et dense>\"%s}",
              soul_txt ? soul_txt : "",
              clone_txt ? clone_txt : "Taz : developpeur, exigeant, autonome, aime les resultats concrets.",
              ctx,
@@ -10212,11 +10815,6 @@ static void conseil_une_passe(void)
         if (meteo_ok && o < 660)
             o += (size_t)snprintf(q + o, 760 - o, "Dehors %.0f degres, %s. ",
                                   (double)meteo_temp, meteo_texte(meteo_code));
-        if (o < 660)
-            o += (size_t)snprintf(q + o, 760 - o,
-                                  "Mon compagnon : sante %d%%, faim %d%%, energie %d%%. ",
-                                  pet_sante(&pet), (int)(pet.faim / 100),
-                                  (int)(pet.energie / 100));
         {
             int bat = conseil_batterie();
             if (bat >= 0 && o < 660)
@@ -10226,7 +10824,7 @@ static void conseil_une_passe(void)
             snprintf(q + o, 760 - o,
                      "Question : qu'est-ce que je dois retenir ou faire maintenant ? "
                      "Une seule phrase, 15 mots maximum, un ordre concret (partir, brancher, "
-                     "soigner, dormir...). Reprends le delai tel qu'il est ecrit : ne le "
+                     "preparer, dormir...). Reprends le delai tel qu'il est ecrit : ne le "
                      "recalcule pas, n'invente aucun chiffre. S'il n'y a rien avant plusieurs "
                      "heures et que tout va bien, mets RIEN. "
                      "REPONDS UNIQUEMENT L'OBJET JSON DE TES REGLES, avec ta phrase dans "
@@ -10344,6 +10942,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddBoolToObject(r, "veille_nuit", veille_nuit);
     cJSON_AddBoolToObject(r, "rotation", rotation_on);
     cJSON_AddNumberToObject(r, "rotation_s", (double)rotation_s);
+    cJSON_AddNumberToObject(r, "matrix", (double)mtx_etape);   /* 0..3 pluie, 4 rapport */
     cJSON_AddStringToObject(r, "hist_sd_etat", hist_sd_pourquoi);
     cJSON_AddBoolToObject(r, "voix_sortie", voix_sortie);
     cJSON_AddNumberToObject(r, "voix_dit_nb", (double)voix_dit_nb);
@@ -10418,7 +11017,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "chrono_tts_ms", (double)chrono_tts_ms);
     cJSON_AddNumberToObject(r, "radio_etat", (double)radio_etat);
     cJSON_AddStringToObject(r, "radio_station", radios_n > 0 ? radios_nom[radio_sel] : "");
-    cJSON_AddStringToObject(r, "page", ui_page < PAGE_COUNT ? PAGE_NOM[ui_page] : "?");
+    cJSON_AddStringToObject(r, "page", ui_page <= PAGE_REG ? PAGE_NOM[ui_page] : "?");
     cJSON_AddStringToObject(r, "livre", livre_pret ? livre.nom : "");
     cJSON_AddStringToObject(r, "livre_fichier", livre_dernier);
     cJSON_AddNumberToObject(r, "livre_page", livre_pret ? (double)(livre.page + 1) : 0);
@@ -10874,7 +11473,11 @@ extern "C" void app_main(void)
     api_start();
     xTaskCreate(serial_task, "console", 6144, NULL, 4, NULL);
     xTaskCreate(touch_task, "tactile", 4096, NULL, 4, NULL);
-    xTaskCreate(button_task, "boutons", 5120, NULL, 3, NULL);   /* dessine aussi les pages */
+    /* deux taches : l'echantillonneur (prioritaire, ne bloque jamais) remplit la
+       file, l'actionneur la vide — un appui n'est donc jamais perdu, meme si
+       l'ecran met une seconde a se rafraichir. */
+    xTaskCreate(button_echantillonne, "boutons-ech", 3072, NULL, 5, NULL);
+    xTaskCreate(button_action, "boutons-act", 5120, NULL, 3, NULL);
     xTaskCreate(alarme_task, "alarme", 4096, NULL, 3, NULL);
     xTaskCreate(ui_task, "ui", 4096, NULL, 3, NULL);   /* plus de TLS ici : il est dans net_task */
     net_q = xQueueCreate(4, sizeof(int));

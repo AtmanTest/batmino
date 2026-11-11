@@ -40,7 +40,7 @@ en noir et blanc, et qui parle.
 Le rendu est **partagé** : `art.cpp`/`petart.cpp` se compilent côté carte et côté
 PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
 
-## Interface : deux boutons, quatre gestes
+## Interface : deux boutons, cinq gestes
 
     DOUBLE APPUI bouton 1 : LE SEUL geste qui lance l'assistant (chat vocal),
                             depuis n'importe quelle page. La fenêtre pour
@@ -48,6 +48,12 @@ PC. Ce qu'on voit dans `./preview` est exactement ce que l'e-paper affiche.
     APPUI COURT bouton 1  : page SUIVANTE (1 = suite dans la page REPONSE)
     APPUI COURT bouton 2  : page PRÉCÉDENTE (2 = avant dans la page REPONSE)
     APPUI LONG (1 ou 2)   : retour à l'accueil et arrêt de ce qui tourne
+    MAINTIEN (après le long) : répète l'action de la page toutes les 400 ms —
+                            le seul moyen de faire défiler avec deux boutons
+
+La lecture des broches est séparée de l'exécution (`main/geste.h`, deux tâches
+`button_echantillonne` / `button_action`) : un appui n'est jamais perdu, même
+quand la dalle met une seconde à se rafraîchir. Voir `docs/features/01-boutons.md`.
 
     Sur la page LIVRE, les deux boutons tournent les pages du livre et le
     double appui 2 passe au livre suivant (voir docs/features/09-livre.md).
@@ -73,8 +79,16 @@ Pages du cycle, une appli par page (comme les premières versions) :
     HISTORIQUE les derniers échanges lus sur la carte
     YOUTUBE    la chaîne et sa dernière vidéo (vues, âge). Se règle une fois :
                `yt @monpseudo` dans la console, ou `yt UCxxxx...`
+    MATRIX     l'analyse du systeme : une sequence de pluie de code (4 images,
+               pas une animation — la dalle clignote a chaque rafraichissement)
+               puis un rapport fixe sur les mesures reelles : cpu, ram, psram,
+               carte, wifi, batterie, modele du cerveau. Appui LONG 1 = rejouer.
     LIVRE      le lecteur : un .txt par livre dans /livres sur la carte, la
                page courante en grand, position retenue entre deux sessions
+
+La grille des applis : **double appui du bouton 2**, depuis n'importe quelle page.
+Huit tuiles (ACCUEIL, METEO, SYSTEM, HISTO, YOUTUBE, CONSEIL, MATRIX, LIVRE),
+bouton 1 = tuile suivante, bouton 2 = ouvrir, appui long = accueil.
 
 La page RÉGLAGES existe encore dans le code mais n'est plus dans le cycle
 (jugée mal faite) : elle reste joignable par `/reglages` et `/wifi` (et garde
@@ -245,8 +259,13 @@ Si le Wi-Fi manque, la carte le dit a l'ecran au lieu d'attendre.
 
 * Modele : **deepseek-flash** = DeepSeek V4.1 Flash (l'ancien `deepseek-chat`
   donnait des reponses pauvres). Reglable par `/modele?m=deepseek-flash`.
-* Style : le prompt impose UNE phrase, 20 mots maximum, pas de politesses, pas
-  de rappel de la question, pas de description de soi. `max_tokens` 500.
+* Style : **assistante pure, pas de personnage**. Le prompt impose : aucune formule
+  d'ouverture ni de conclusion, pas de liste markdown, pas d'emoji, aucun commentaire
+  sur soi-meme ni sur l'humeur de Taz. La reponse va aussi loin que la question
+  l'exige (un mot si un mot suffit, sinon jusqu'a 900 signes, ce que l'ecran affiche
+  en quatre pages). Le champ `emotion` n'est plus une reaction : c'est une etiquette
+  technique qui choisit un visage, dans une liste sobre (neutre, calme, reflexion,
+  concentration, doute, fatigue...). `max_tokens` 500.
 * Contexte injecte a chaque appel : date + heure en francais, meteo
   maintenant, meteo de demain (min/max, pluie), et les 8 titres du moment
   (franceinfo, rafraichis toutes les 30 min). Le modele ne repond donc plus
