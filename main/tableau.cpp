@@ -109,23 +109,28 @@ static void barre(int x, int y, int w, int h, int pct)
             a_px(x + 1 + dx, y + dy, 1);
 }
 
-/* un texte en deux lignes de "cols" signes, coupees sur un espace */
-static void deux_lignes(char *l1, char *l2, const char *src, int cols)
+/* un texte en trois lignes de "cols" signes au plus, coupees sur un espace ;
+   ce qui reste apres la troisieme ligne est perdu (la page n'a pas de place) */
+static void trois_lignes(char *l1, char *l2, char *l3, const char *src, int cols)
 {
-    l1[0] = l2[0] = 0;
+    l1[0] = l2[0] = l3[0] = 0;
     if (!src || !src[0]) return;
-    int n = (int)strlen(src);
-    if (n <= cols) { snprintf(l1, 40, "%s", src); return; }
-    int k = cols;
-    while (k > 6 && src[k] != ' ') k--;
-    if (k <= 6) k = cols;
-    snprintf(l1, 40, "%.*s", k, src);
-    const char *p = src + k;
-    while (*p == ' ') p++;
-    snprintf(l2, 40, "%.*s", cols, p);
+    char *dst[3] = { l1, l2, l3 };
+    const char *p = src;
+    for (int i = 0; i < 3 && *p; i++) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        int n = (int)strlen(p);
+        if (n <= cols) { snprintf(dst[i], 40, "%s", p); return; }
+        int k = cols;
+        while (k > 6 && p[k] != ' ') k--;
+        if (k <= 6) k = cols;
+        snprintf(dst[i], 40, "%.*s", k, p);
+        p += k;
+    }
 }
 
-/* petites barres de signal (8x9 px) : l'icone wifi de art.h est trop haute
+/* petites barres de signal (10x7 px) : l'icone wifi de art.h est trop haute
    pour la bande d'etat */
 static void mini_wifi(int x, int y, bool on, int rssi)
 {
@@ -140,7 +145,7 @@ static void mini_wifi(int x, int y, bool on, int rssi)
     if (!on) a_hline(x - 1, x + 9, y + 2, 1);   /* barre = hors ligne */
 }
 
-/* une lettre seule, corps 1 (l'etiquette d'une jauge) */
+/* une lettre seule, corps 1 */
 static void g_lettre(int x, int y, char c)
 {
     char s[2] = { c, 0 };
@@ -300,64 +305,41 @@ void tableau_dessine(const tableau_t *t)
     /* ============ rangee 4 : le dernier mot et le conseil ============ */
     {
         int y = 145;
-        char l1[40], l2[40];
+        char l1[40], l2[40], l3[40];
         lab(3, y, "DERNIER MOT");
-        deux_lignes(l1, l2, t->dernier, 23);
+        trois_lignes(l1, l2, l3, t->dernier, 23);
         lab(3, y + 7, l1[0] ? l1 : "-");
         if (l2[0]) lab(3, y + 14, l2);
+        if (l3[0]) lab(3, y + 21, l3);
 
         lab(104, y, "CONSEIL");
-        deux_lignes(l1, l2, t->conseil, 23);
+        trois_lignes(l1, l2, l3, t->conseil, 23);
         lab(104, y + 7, l1[0] ? l1 : "-");
         if (l2[0]) lab(104, y + 14, l2);
+        if (l3[0]) lab(104, y + 21, l3);
     }
-    a_hline(2, 197, 166, 1);
+    a_hline(2, 197, 172, 1);
 
-    /* ============ pied : youtube, livre, jauges ====================== */
+    /* ============ pied : le compagnon, ses quatre jauges ============ */
+    /* YouTube et le livre ont ete retires le 11/11 : la place sert aux
+       jauges, qui disent ce dont il a besoin maintenant. */
     {
-        lab(3, 169, "CH.");
-        if (t->yt_chaine[0]) {
-            coupe(d, sizeof(d), t->yt_chaine, 14);
-            lab(3 + a_text_w(1, "CH.") + 4, 169, d);
-        }
-        if (t->yt_vues) {
-            if (t->yt_vues >= 1000000UL)
-                snprintf(b, sizeof(b), "%lu,%02luM VUES", t->yt_vues / 1000000UL,
-                         (t->yt_vues / 10000UL) % 100UL);
-            else if (t->yt_vues >= 1000UL)
-                snprintf(b, sizeof(b), "%luK VUES", t->yt_vues / 1000UL);
-            else
-                snprintf(b, sizeof(b), "%lu VUES", t->yt_vues);
-            txt_r(197, 169, 1, b);
-        }
-        if (t->yt_video[0]) {
-            coupe(d, sizeof(d), t->yt_video, 49);
-            lab(3, 176, d);
-        }
-
-        if (t->livre_n > 0) {
-            snprintf(b, sizeof(b), "LIVRE %s %d/%d", t->livre, t->livre_p + 1, t->livre_n);
-            coupe(d, sizeof(d), b, 30);
-            lab(3, 183, d);
-            barre(150, 184, 47, 6, t->livre_n > 1 ? t->livre_p * 100 / (t->livre_n - 1) : 0);
-        } else {
-            lab(3, 183, "PAS DE LIVRE");
-        }
-
-        /* les jauges du compagnon : F faim, B bonheur, E energie, S sante */
-        {
-            struct { char l; int v; } j[4] = {
-                { 'F', t->faim }, { 'B', t->bonheur }, { 'E', t->energie }, { 'S', t->sante }
-            };
-            int x = 3;
-            for (int i = 0; i < 4; i++) {
-                g_lettre(x, 191, j[i].l);
-                if (j[i].v < 0) lab(x + 6, 191, "-");   /* n.d. : jamais un zero */
-                else            barre(x + 6, 191, 18, 6, j[i].v);
-                x += 27;
+        struct { const char *nom; int v; } j[4] = {
+            { "FAIM",  t->faim },  { "BONH",  t->bonheur },
+            { "ENER",  t->energie }, { "SANTE", t->sante }
+        };
+        for (int i = 0; i < 4; i++) {
+            int x = (i % 2) ? 104 : 3;
+            int y = (i < 2) ? 176 : 189;
+            lab(x, y, j[i].nom);
+            if (j[i].v < 0)                 /* n.d. : jamais une barre vide */
+                lab(x + 20, y, "-");
+            else {
+                barre(x + 18, y - 1, 44, 8, j[i].v);
+                snprintf(b, sizeof(b), "%d", j[i].v);
+                txt_r(x + 92, y + 1, 1, b);    /* x+92 : la colonne s'arrete a 95/196 */
             }
-            if (t->alarme) txt_r(197, 192, 1, "ALARME 1=STOP");
-            else           txt_r(197, 192, 1, "LONG 2 = LIVRE");
         }
+        if (t->alarme) txt_r(197, 145, 1, "ALARME 1=STOP");
     }
 }

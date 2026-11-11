@@ -205,10 +205,10 @@ def main():
     time.sleep(1.6)
     c.cmd("btn 2 long", r"essai bouton 2", 12)
     page = c.diag().get("page", "?")
-    if page == "LIVRE":
-        ok("appui long 2 : ouvre le livre", page)
+    if page == "ACCUEIL":
+        ok("appui long 2 : plus de livre, on reste sur le tableau", page)
     else:
-        ko("appui long 2 : ouvre le livre", page)
+        ko("appui long 2 : plus de livre, on reste sur le tableau", page)
 
     time.sleep(1.6)
     c.cmd("btn 1 long", r"essai bouton 1", 12)
@@ -221,7 +221,7 @@ def main():
     # ---------------------------------------------- 3. la dalle suit le dessin
     print("\n3. la dalle suit bien le dessin (docs/features/06-ecran-eink.md)")
     images = {}
-    for i, nom in (("0", "ACCUEIL"), ("7", "LIVRE")):
+    for i, nom in (("0", "ACCUEIL"), ("2", "SYSTEM")):
         c.cmd(f"ui {i}", r"page=|$^", 4)
         time.sleep(1.2)
         img = c.fb()
@@ -230,10 +230,11 @@ def main():
             continue
         images[nom] = img
         c.png(img, f"/tmp/test_{nom.lower()}.png")
-    if len(images) == 2 and images["ACCUEIL"] != images["LIVRE"]:
-        ok("le tableau et le livre donnent deux images", "/tmp/test_accueil.png, /tmp/test_livre.png")
+    if len(images) == 2 and images["ACCUEIL"] != images["SYSTEM"]:
+        ok("le tableau et la page SYSTEM donnent deux images",
+           "/tmp/test_accueil.png, /tmp/test_system.png")
     else:
-        ko("le tableau et le livre donnent deux images",
+        ko("le tableau et la page SYSTEM donnent deux images",
            f"{len(set(images.values()))} image(s) pour {len(images)} ecran(s)")
     if "ACCUEIL" in images and images["ACCUEIL"].strip("f"):
         ok("le tableau est dessine (framebuffer non vide)")

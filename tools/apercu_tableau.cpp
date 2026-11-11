@@ -46,7 +46,6 @@ int main(int argc, char **argv)
         t.stade = "BEBE"; t.forme = "-"; t.emotion = "calme"; t.age_j = 0;
         t.faim = t.bonheur = t.energie = t.sante = -1;
         t.cpu_pct = 0; t.ram_libre_k = 0;
-        t.livre_n = 0;
     } else {
         t.heure = 18; t.minute = 54;
         t.sem = 3; t.jour = 11; t.mois = 10;
@@ -67,12 +66,6 @@ int main(int argc, char **argv)
                  "Tu as dit que tu voulais ranger l'atelier ce week-end.");
         snprintf(t.conseil, sizeof(t.conseil),
                  "Batterie a 36%%, branche le chargeur avant ce soir.");
-        snprintf(t.yt_chaine, sizeof(t.yt_chaine), "@youtube");
-        snprintf(t.yt_video, sizeof(t.yt_video),
-                 "COMMENT CREER UN AQUARIUM PLANTE DE A A Z AVEC SERPADESIGN");
-        t.yt_vues = 1370938UL;
-        snprintf(t.livre, sizeof(t.livre), "FLEURS");
-        t.livre_p = 80; t.livre_n = 456;
     }
 
     t.visage = 1;

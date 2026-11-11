@@ -61,12 +61,6 @@ static void plein(tableau_t *t)
              "Tu as dit que tu voulais ranger l'atelier ce week-end.");
     snprintf(t->conseil, sizeof(t->conseil),
              "Batterie a 36, branche le chargeur avant ce soir.");
-    snprintf(t->yt_chaine, sizeof(t->yt_chaine), "@youtube");
-    snprintf(t->yt_video, sizeof(t->yt_video),
-             "COMMENT CREER UN AQUARIUM PLANTE DE A A Z AVEC SERPADESIGN");
-    t->yt_vues = 1370938UL;
-    snprintf(t->livre, sizeof(t->livre), "FLEURS");
-    t->livre_p = 80; t->livre_n = 456;
     t->visage = 1;
 }
 
@@ -100,8 +94,8 @@ int main(void)
     VERIF(encre_bande(48, 77) > 100, "rangee 1 : meteo et demain");
     VERIF(encre_bande(80, 109) > 100, "rangee 2 : interieur et batterie");
     VERIF(encre_bande(112, 141) > 100, "rangee 3 : systeme et agenda");
-    VERIF(encre_bande(144, 165) > 60, "rangee 4 : dernier mot et conseil");
-    VERIF(encre_bande(168, 199) > 100, "pied : youtube, livre, jauges");
+    VERIF(encre_bande(144, 171) > 60, "rangee 4 : dernier mot et conseil");
+    VERIF(encre_bande(174, 199) > 150, "pied : les quatre jauges du compagnon");
 
     /* ---- 3. le rendu est deterministe ---- */
     static uint8_t ref[ART_FB_LEN];
@@ -121,8 +115,10 @@ int main(void)
         VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "perdre la meteo change l'image");
         plein(&v); v.rdv_quand[0] = 0; v.rdv_qui[0] = 0; v.rappels = 2; rend(&v);
         VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "changer l'agenda change l'image");
-        plein(&v); v.livre_n = 0;                                  rend(&v);
-        VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "perdre le livre change l'image");
+        plein(&v); v.faim = 10; v.bonheur = 100;                   rend(&v);
+        VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "changer les jauges change l'image");
+        plein(&v); v.dernier[0] = 0; v.conseil[0] = 0;             rend(&v);
+        VERIF(memcmp(ref, fb, sizeof(ref)) != 0, "perdre les deux textes change l'image");
     }
 
     /* ---- 5. donnees absentes : N.D. / --, jamais un zero ni un nom suppose ---- */
@@ -141,7 +137,7 @@ int main(void)
         VERIF(encre() > 800, "la page reste dessinee sans aucune donnee");
         VERIF(encre_bande(34, 45) > 20, "hors ligne : le filet d'etat le dit");
         /* les jauges inconnues ne dessinent pas de barre pleine */
-        int bas = encre_bande(188, 199);
+        int bas = encre_bande(174, 199);
         VERIF(bas < 400, "jauges n.d. : pas de barres pleines");
     }
 
@@ -149,8 +145,7 @@ int main(void)
     {
         tableau_t v;
         plein(&v);
-        memset(v.yt_video, 'A', sizeof(v.yt_video) - 1);   /* 95 signes */
-        memset(v.dernier, 'B', sizeof(v.dernier) - 1);
+        memset(v.dernier, 'B', sizeof(v.dernier) - 1);   /* 95 signes */
         memset(v.conseil, 'C', sizeof(v.conseil) - 1);
         memset(v.rdv_qui, 'D', sizeof(v.rdv_qui) - 1);
         memset(v.ssid, 'E', sizeof(v.ssid) - 1);

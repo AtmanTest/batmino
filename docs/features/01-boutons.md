@@ -9,15 +9,14 @@ la dalle met une seconde à se rafraîchir.
 | Geste | Bouton 1 (BOOT) | Bouton 2 (PWR) |
 |---|---|---|
 | appui court | relit les données du tableau (1 = suite dans REPONSE) | rien sur le tableau (2 = avant dans REPONSE) |
-| double appui | lance l'assistant vocal (et **lui seul**) | ouvre le LIVRE (puis : livre suivant) |
-| appui long | retour à l'accueil, tâche en cours arrêtée | sur le tableau : ouvre le LIVRE ; ailleurs : retour à l'accueil |
-| maintien prolongé | répète l'action de la page (défilement du livre) | idem, sens inverse |
+| double appui | lance l'assistant vocal (et **lui seul**) | sans effet depuis le 11/11 (plus de livre à ouvrir) |
+| appui long | retour à l'accueil, tâche en cours arrêtée | idem |
+| maintien prolongé | répète l'action de la page | idem, sens inverse |
 
 Depuis la page unique (11/11), il n'y a plus qu'un écran : « page suivante » n'a
 plus de sens, et le bouton 1 court sert à redemander une lecture fraîche (météo,
-chaîne YouTube, capteurs). Le LIVRE — la seule appli qui ne se compresse pas sur
-une page — s'ouvre au **long du bouton 2** (ou au double 2), et se quitte à
-l'appui long, comme partout.
+capteurs). Le livre a quitté l'écran le même jour : plus aucun geste ne l'ouvre,
+il se pilote par le web (`/livre?op=liste`).
 
 Règles qui ne changent pas :
 
@@ -108,7 +107,7 @@ Rejoués par `tools/test_global.py` (section 2), et à la main par la console US
 |---|---|
 | `btn 1` depuis le tableau | on reste sur le tableau, `meteo_force`/`yt_force` armes, un bip |
 | `btn 2` depuis le tableau | on reste sur le tableau (aucune page à tourner) |
-| `btn 2 long` depuis le tableau | page LIVRE (`/state` → `page: LIVRE`) |
+| `btn 2 long` depuis le tableau | on reste sur le tableau (plus de livre) |
 | `btn 1 long` depuis n'importe où | ACCUEIL |
 | deux `btn 1` à moins de 1,2 s | deux relectures, aucun appui perdu |
 | appui simple du bouton 1 | ne lance **jamais** l'assistant |

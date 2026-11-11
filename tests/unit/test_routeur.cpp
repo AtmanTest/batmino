@@ -139,7 +139,7 @@ int main(void)
     remise();
     bouton_court(0);
     VERIF(ui_page == PAGE_MAITRE && n_show == 1, "ACCUEIL + court 1 : on reste sur le tableau");
-    VERIF(meteo_force && yt_force, "ACCUEIL + court 1 : relecture meteo et youtube demandee");
+    VERIF(meteo_force, "ACCUEIL + court 1 : relecture meteo demandee");
     VERIF(n_capteurs == 1 && n_beep == 1, "ACCUEIL + court 1 : capteurs relus et bip");
     bouton_court(1);
     VERIF(ui_page == PAGE_MAITRE, "court 2 sur le tableau : aucune page a tourner");
@@ -255,8 +255,8 @@ int main(void)
     remise();
     ui_page = PAGE_YT;
     bouton_double(1);
-    VERIF(n_assist == 0 && ui_page == PAGE_LIVRE, "double 2 hors LIVRE : ouvre le livre, pas l'assistant");
-    VERIF(n_livre_reprise == 1, "double 2 : le livre reprend ou il en etait");
+    VERIF(n_assist == 0 && ui_page == PAGE_MAITRE, "double 2 : plus de livre, retour au tableau");
+    VERIF(n_livre_reprise == 0, "double 2 : le livre n'est plus ouvert");
 
     /* ---- LAUNCHER : la grille ouvre les applis ---- */
     remise();
@@ -272,16 +272,16 @@ int main(void)
     remise();
     ui_page = PAGE_SYS;
     bouton_double(1);
-    VERIF(ui_page == PAGE_LIVRE, "double 2 depuis SYSTEM : ouvre le livre");
+    VERIF(ui_page == PAGE_MAITRE, "double 2 depuis SYSTEM : retour au tableau");
 
-    /* ---- ACCUEIL : le long 2 ouvre le livre, le long 1 rend la main ---- */
+    /* ---- ACCUEIL : le livre a quitte l'ecran, le long ramene au tableau ---- */
     remise();
     bouton_long(1, 0);
-    VERIF(ui_page == PAGE_LIVRE && n_livre_reprise == 1, "ACCUEIL + long 2 : ouvre le livre");
+    VERIF(ui_page == PAGE_MAITRE && n_livre_reprise == 0, "ACCUEIL + long 2 : plus de livre");
+    VERIF(n_tache == 1, "ACCUEIL + long 2 : le long garde son role d'arret");
     remise();
-    ui_page = PAGE_LIVRE; livre_pret = true;
-    bouton_court(0);
-    VERIF(n_livre_tourne == 1, "LIVRE ouvert au long 2 : le court tourne les pages");
+    bouton_long(0, 0);
+    VERIF(ui_page == PAGE_MAITRE, "ACCUEIL + long 1 : on reste sur le tableau");
 
     /* ---- la table couvre tous les ecrans ---- */
     VERIF(page_act() != NULL, "une page du cycle a sa ligne");

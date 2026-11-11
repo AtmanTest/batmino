@@ -223,7 +223,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-11-11 page-unique"
+#define APP_VER "2026-11-11 page-unique-2"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -1603,10 +1603,7 @@ static void appli_sort(int p)
         else if (yt_buf) { free(yt_buf); yt_buf = NULL; yt_buf_taille = 0; }
         break;
     case PAGE_LIVRE:
-        /* la PSRAM du livre N'EST PLUS rendue en quittant la page : son titre
-           et sa progression vivent dans le pied du tableau unique. On note la
-           page courante, on garde le texte en PSRAM (8 Mo, une seule copie
-           d'environ 1 Mo). */
+        livre_arret();                   /* la PSRAM du livre est rendue */
         break;
     case PAGE_MATRIX:
         mtx_stop();                      /* la sequence s'arrete avec la page */
@@ -3551,17 +3548,9 @@ static void tableau_maitre(void)
     }
     snprintf(t.conseil, sizeof(t.conseil), "%.*s", (int)sizeof(t.conseil) - 1, conseil_txt);
 
-    /* ---- youtube ---- */
-    snprintf(t.yt_chaine, sizeof(t.yt_chaine), "%.*s", (int)sizeof(t.yt_chaine) - 1, yt_handle);
-    snprintf(t.yt_video,  sizeof(t.yt_video),  "%.*s", (int)sizeof(t.yt_video) - 1, yt_titre);
-    t.yt_vues = (yt_vues > 0) ? (unsigned long)yt_vues : 0UL;
-
-    /* ---- le livre en cours ---- */
-    if (livre_pret) {
-        snprintf(t.livre, sizeof(t.livre), "%.*s", (int)sizeof(t.livre) - 1, livre.nom);
-        t.livre_p = livre.page;
-        t.livre_n = livre_pages(&livre);
-    }
+    /* youtube et le livre ont ete retires de la page le 11/11 : leurs
+       donnees restent dans le firmware (routes /livre, /state) mais ne sont
+       plus collectees pour le tableau. */
 
     t.alarme = alarme_on;
     tableau_dessine(&t);
@@ -4133,29 +4122,13 @@ static bool act_maitre_court(int n)
 {
     if (n != 0) return false;              /* bouton 2 : comportement commun */
     meteo_force = true;                    /* lecture fraiche (la tache reseau) */
-    yt_force = true;
     ui_read_sensors();
     ui_beep();
-    ESP_LOGI(TAG, "tableau : bouton 1 -> relecture (meteo, youtube, capteurs)");
+    ESP_LOGI(TAG, "tableau : bouton 1 -> relecture (meteo, capteurs)");
     show_ui();
     return true;
 }
 
-/* ACCUEIL, bouton 2 LONG : LE LIVRE. La seule appli qui ne tient pas sur la
-   page unique, et le geste le plus sur avec deux boutons (un appui long se lit
-   sans ambiguite, alors qu'un double appui depend du rebond du contact).
-   Le long du bouton 1 reste le retour a l'accueil / l'arret de ce qui tourne. */
-static bool act_maitre_lng(int n, bool tres_long)
-{
-    (void)tres_long;
-    if (n != 1) return false;
-    if (act_on || wake_busy || radio_etat || voix_etat) return false;
-    if (!livre_pret) livre_reprise();
-    ui_page = PAGE_LIVRE;
-    ESP_LOGI(TAG, "tableau : appui long 2 -> livre");
-    show_ui();
-    return true;
-}
 
 /* LAUNCHER : bouton 1 = tuile suivante, bouton 2 = ouvrir. L'appui long n'est
    pas pris : il rend l'accueil comme partout. */
@@ -4172,7 +4145,7 @@ static bool act_lanc_court(int n)
 }
 
 static const page_act_t PAGE_ACT[PAGE_REG + 1] = {
-    /* ACCUEIL    */ { act_maitre_court, NULL, act_maitre_lng, NULL },
+    /* ACCUEIL    */ { act_maitre_court, NULL, NULL, NULL },
     /* METEO      */ { NULL, NULL, NULL, NULL },
     /* SYSTEM     */ { NULL, NULL, NULL, NULL },
     /* HISTORIQUE */ { NULL, NULL, act_hist_lng, NULL },
@@ -4247,13 +4220,12 @@ static void bouton_double(int n)
         assistant_wake();
         return;
     }
-    /* double appui bouton 2 : LE LIVRE, l'appli qui ne tient pas sur la page
-       unique (meme geste que l'appui long du bouton 2, pour ceux qui preferent
-       le double). Sur LIVRE le geste reste au livre (la table l'a pris avant). */
-    ESP_LOGI(TAG, "bouton 2 : double appui -> livre");
+    /* double appui bouton 2 : plus rien a ouvrir depuis que le livre est
+       retire de l'ecran (11/11). Le geste reste muet plutot que de renvoyer
+       vers une page qui n'existe plus dans l'interface. */
+    ESP_LOGI(TAG, "bouton 2 : double appui (sans effet, plus de livre)");
     if (rep_ouvert) rep_ferme();
-    if (!livre_pret) livre_reprise();
-    ui_page = PAGE_LIVRE;
+    ui_page = PAGE_MAITRE;
     show_ui();
 }
 
@@ -4675,7 +4647,6 @@ static void net_task(void *arg)
 
 static void ui_task(void *arg)
 {
-    static bool livre_amorce = false;   /* le livre du pied de page, charge une fois */
     int last_min = -1;
     int last_secu = -999;
     int derniere_meteo = -100000;      /* -> premiere mesure tout de suite */
@@ -4695,13 +4666,6 @@ static void ui_task(void *arg)
         }
         wifi_ap_record_t ap = {};
         ui_wifi_ok = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
-        if (!livre_amorce && sd_ok) {
-            /* le pied du tableau annonce le livre en cours : on l'ouvre une
-               fois, sinon il faudrait entrer dans la page LIVRE pour que la
-               ligne apparaisse */
-            livre_amorce = true;
-            if (livre_reprise()) show_ui();
-        }
         if (ti.tm_min != last_min) {
             last_min = ti.tm_min;
             heure_sauve();          /* pour que le prochain demarrage soit a l'heure */
@@ -4726,8 +4690,7 @@ static void ui_task(void *arg)
                                             l'ecran ne doit jamais l'attendre */
         }
         /* la chaine YouTube : a l'ouverture de sa page, puis toutes les 30 min */
-        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
-            (ui_page == PAGE_YT || ui_page == PAGE_MAITRE) &&
+        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) && ui_page == PAGE_YT &&
             ((int)now - derniere_yt >= 1800 || yt_force)) {
             yt_force = false;
             derniere_yt = (int)now;

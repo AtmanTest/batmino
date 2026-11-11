@@ -16,11 +16,10 @@ information : elle est là, ou elle n'existe pas.
     y 110  filet
     y 113  SYSTÈME (cpu, ram)                 | AGENDA (prochain rdv ou minuteurs)
     y 142  filet
-    y 145  DERNIER MOT (2 lignes)             | CONSEIL (2 lignes)
-    y 168  filet
-    y 171  pied : YouTube (chaîne, vues, vidéo), livre en cours + jauge, les
-           quatre jauges du compagnon (F faim, B bonheur, E énergie, S santé)
-           et le rappel des gestes
+    y 145  DERNIER MOT (3 lignes)             | CONSEIL (3 lignes)
+    y 172  filet
+    y 176  pied : les quatre jauges du compagnon, en deux colonnes
+           (FAIM, BONH | ENER, SANTE) avec leur valeur en clair
 
 Règle de lecture, héritée du reste du firmware : **une valeur indisponible
 affiche `N.D.` ou `--`, jamais zéro ni un nom supposé.** Une jauge inconnue
@@ -35,8 +34,8 @@ affiche un tiret, pas une barre vide (qui se lirait « à zéro »).
 | page ACCUEIL (heure, date, rdv) | en-tête et rangée 3 |
 | page HISTORIQUE | « DERNIER MOT » (rangée 4) |
 | page CONSEIL | « CONSEIL » (rangée 4) |
-| page YOUTUBE | pied de page |
-| page LIVRE | **conservée** : seule appli qui ne tient pas sur une page |
+| page YOUTUBE | **retirée** le 11/11 (plus affichée, plus relue : son TLS toutes les 30 min n'a plus de consommateur) |
+| page LIVRE | **retirée de l'écran** le 11/11 ; le lecteur reste dans le firmware et se pilote par le web (`/livre?op=liste`) |
 | launcher (grille de 8 tuiles) | supprimé : plus rien à lancer |
 | personnalité, voix, radio, rappels, réglages | inchangés (écrans plein écran et web) |
 
@@ -49,15 +48,14 @@ cycle) reste joignable par le web pour le clavier Wi-Fi.
 
 | Geste | Effet |
 |---|---|
-| bouton 1 court | relit les données (météo, chaîne YouTube, capteurs) et redessine |
+| bouton 1 court | relit les données (météo, capteurs) et redessine |
 | bouton 2 court | rien de plus : il n'y a pas d'autre page |
 | double bouton 1 | l'assistant vocal (inchangé, depuis n'importe quel écran) |
-| bouton 2 **long** | ouvre le LIVRE (double appui bouton 2 : idem) |
-| bouton 1 long | retour au tableau, arrêt de ce qui tourne (voix, radio) |
-| sur LIVRE | bouton 1 = page suivante, bouton 2 = précédente, long = retour |
+| double bouton 2 | sans effet (plus de livre à ouvrir) |
+| appui long (1 ou 2) | retour au tableau, arrêt de ce qui tourne (voix, radio) |
 
-Le LIVRE reste la seule exception parce qu'un lecteur ne se compresse pas :
-c'est une appli, pas une information. On en sort par l'appui long.
+Depuis le 11/11, aucun geste n'ouvre plus le livre : la page unique ne le
+montre plus et son lecteur se pilote par le web.
 
 ## Comment c'est fait
 
@@ -77,7 +75,7 @@ c'est une appli, pas une information. On en sort par l'appui long.
 - `tableau_maitre()` dans `main.cpp` remplit la structure avec les valeurs
   vivantes (horloge, `wifi_actif`, SHTC3, météo, compagnon sous `pet_mux`,
   `sys_cpu10`, agenda `ms_*`, dernier tour de MINO lu dans `hist`,
-  `conseil_txt`, `yt_*`, livre) puis appelle `tableau_dessine()`.
+  `conseil_txt`) puis appelle `tableau_dessine()`.
 - Le signe `%` est dessiné (deux points + barre) et non pris dans la police
   3x5 : son glyphe ressemble à un `Z` dès le corps 2.
 - L'icône Wi-Fi de `art.h` fait 24 px de haut et ne rentre pas dans la bande
@@ -94,7 +92,7 @@ c'est une appli, pas une information. On en sort par l'appui long.
 | encre | la page porte du contenu (19 % de pixels noirs avec un jeu complet) et reste sous 45 % |
 | zones | les sept bandes (en-tête, état, 4 rangées, pied) contiennent de l'encre |
 | déterminisme | deux rendus de la même donnée sont identiques au pixel |
-| sensibilité | changer l'heure, la batterie, la météo, l'agenda ou le livre change l'image |
+| sensibilité | changer l'heure, la batterie, la météo, l'agenda, les jauges ou les deux textes change l'image |
 | données absentes | la page reste dessinée, `N.D.` / `--`, aucune jauge pleine |
 | texte très long | 95 signes dans chaque champ : la dernière colonne de pixels reste blanche |
 

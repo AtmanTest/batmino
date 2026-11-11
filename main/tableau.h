@@ -61,15 +61,6 @@ typedef struct {
     char dernier[TAB_TXT_MAX];
     char conseil[TAB_TXT_MAX];
 
-    /* --- youtube --- */
-    char yt_chaine[TAB_SSID_MAX];
-    char yt_video[TAB_TXT_MAX];
-    unsigned long yt_vues;
-
-    /* --- livre en cours --- */
-    char livre[28];
-    int  livre_p, livre_n;
-
     /* --- etat --- */
     bool alarme;
     int  visage;                  /* 0 joie, 1 neutre, 2 peine, 3 endormi */
