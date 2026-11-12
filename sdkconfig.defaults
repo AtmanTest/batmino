@@ -45,3 +45,8 @@ CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 
 # CONFIG_MBEDTLS_HARDWARE_AES is not set
+
+# gestion d'energie : le coeur descend a 80 MHz au repos et dort entre deux
+# reveils du wifi (sans ca, la carte reste a 160 MHz en permanence)
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y

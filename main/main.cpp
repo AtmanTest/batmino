@@ -31,6 +31,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_cpu.h"
+#include "esp_pm.h"
 #include "esp_adc/adc_oneshot.h"
 #include "lwip/netif.h"
 #include "nvs_flash.h"
@@ -186,7 +187,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-11-11 wifi-visible"
+#define APP_VER "2026-11-12 veille"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -3194,6 +3195,9 @@ static void ui_task(void *arg)
         ui_wifi_ok = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
         if (ti.tm_min != last_min) {
             last_min = ti.tm_min;
+            ESP_LOGI(TAG, "energie : cpu %d MHz, %u o libres (repos)",
+                     (int)(esp_clk_cpu_freq() / 1000000),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             heure_sauve();          /* pour que le prochain demarrage soit a l'heure */
             ui_read_sensors();
             kirby_promene();        /* il avance d'un pas par minute : une seule
@@ -8645,6 +8649,12 @@ static void mino_handle_line(const char *line)
    !st              etat du driver                                                        */
 static void console_epd(const char *c)
 {
+    if (!strcmp(c, "pm")) {           /* qui empeche le CPU de dormir ? */
+        esp_pm_dump_locks(stdout);
+        fflush(stdout);
+        ESP_LOGI(TAG, "energie : cpu %d MHz", (int)(esp_clk_cpu_freq() / 1000000));
+        return;
+    }
     /* !wifi                : etat
        !wifi <ssid> <pass>  : bascule a chaud (marche meme sans reseau) */
     if (!strncmp(c, "wifi", 4)) {
@@ -9608,6 +9618,23 @@ static board_power_bsp_t board_div(EPD_PWR_PIN, Audio_PWR_PIN, VBAT_PWR_PIN);
 
 extern "C" void app_main(void)
 {
+    /* ---- gestion d'energie : la carte ne doit pas rester eveillee a 160 MHz
+       CPU 100 % du temps. Avec PM_ENABLE, le coeur descend a 80 MHz au repos
+       et dort (light sleep) entre deux reveils du wifi : c'est ce qui fait
+       tenir la batterie, pas une optimisation de tache (le CPU est deja
+       inactif a 90 %). Les pilotes (I2S, SPI, UART) prennent leurs propres
+       verrous quand ils en ont besoin. ---- */
+    {
+        esp_pm_config_t pm = {};
+        pm.max_freq_mhz = 160;          /* les rafales (TLS, TTS) gardent leur vitesse */
+        pm.min_freq_mhz = 80;           /* au repos : la moitie */
+        pm.light_sleep_enable = true;   /* et le sommeil entre deux reveils wifi */
+        esp_err_t e = esp_pm_configure(&pm);
+        ESP_LOGI(TAG, "energie : pm %s (80-160 MHz, light sleep %s)",
+                 e == ESP_OK ? "actif" : esp_err_to_name(e),
+                 pm.light_sleep_enable ? "oui" : "non");
+    }
+
     esp_err_t r = nvs_flash_init();
     if (r == ESP_ERR_NVS_NO_FREE_PAGES || r == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
