@@ -58,7 +58,16 @@ int main(int argc, char **argv)
 
     art_begin(fbuf, 0);
     art_clear();
-    tableau_dessine(&t);
+    if (!strcmp(mode, "astuce")) {
+        astuce_dessine(
+            "When to unfollow, live or offline? Desactive les alertes de follow "
+            "pendant que tu joues : ton chat reste lisible.",
+            "R/TWITCH", "12 NOV 06H07", true);
+    } else if (!strcmp(mode, "astuce-vide")) {
+        astuce_dessine("", "", "", false);
+    } else {
+        tableau_dessine(&t);
+    }
     ecrit(out);
     return 0;
 }

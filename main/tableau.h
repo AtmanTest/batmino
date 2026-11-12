@@ -53,6 +53,10 @@ typedef struct {
 /* dessine la page entiere dans le framebuffer courant (art_begin deja fait) */
 void tableau_dessine(const tableau_t *t);
 
+/* la deuxieme page : l'astuce de streaming du jour (lue sur le web une fois
+   par jour). dispo = false : rien de lu encore, la page le dit. */
+void astuce_dessine(const char *texte, const char *source, const char *quand, bool dispo);
+
 /* largeur en pixels d'un texte de la police 3x5 (utilitaire d'alignement) */
 int tab_text_w(int s, const char *str);
 

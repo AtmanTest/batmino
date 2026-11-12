@@ -187,7 +187,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-11-12 veille"
+#define APP_VER "2026-11-12 astuce"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -258,6 +258,27 @@ static float meteo_dem_min = 0, meteo_dem_max = 0;
 static int   meteo_dem_code = -1, meteo_dem_pluie = -1;
 static bool meteo_lire(void);
 static const char *meteo_texte(int code);
+
+/* ---- L'ASTUCE DU JOUR ----------------------------------------------------
+   Une vraie astuce de streaming, lue sur le web UNE fois par jour (les tops
+   du jour de r/Twitch puis r/Kick), gardee en NVS : la page 2 l'affiche sans
+   reseau. astuce_jour = numero de jour (epoch / 86400) de la derniere lecture,
+   ce qui evite toute lecture supplementaire avant le lendemain. */
+#define ASTUCE_URL1 "https://www.reddit.com/r/Twitch/top/.rss?t=day"
+#define ASTUCE_URL2 "https://www.reddit.com/r/Kick/top/.rss?t=day"
+#define ASTUCE_UA   "MinoBot/1.0 (ESP32-S3 e-paper robot; +https://espressif.lan)"
+#define ASTUCE_TXT_MAX 220
+static char astuce_txt[ASTUCE_TXT_MAX] = "";
+static char astuce_src[24] = "";
+static char astuce_quand[20] = "";      /* "12 NOV 05:41" */
+static int  astuce_jour = -1;           /* jour de la derniere lecture */
+static volatile bool astuce_dispo = false;
+static volatile bool astuce_demande = false;   /* lecture forcee (bouton 1) */
+static volatile bool astuce_occupe = false;
+static volatile int64_t astuce_essai_ms = 0;   /* dernier essai : attente apres un echec */
+static bool astuce_lire(void);
+static void astuce_charge(void);
+static void astuce_sauve(void);
 static const char *ia_key(void);
 static bool groq_pret(void);
 static void radio_wifi_task(void *arg);
@@ -273,8 +294,9 @@ static void tableau_maitre(void);          /* la page unique, definie plus bas *
  *   4 MEMOIRE  ce qu'il sait
  *   5 RADIO     la radio (le PC n'est plus necessaire)
  */
-/* une seule page depuis le 11/11 : le tableau */
+/* deux pages : le tableau, et l'astuce de streaming du jour */
 #define PAGE_MAITRE 0
+#define PAGE_ASTUCE 1
 
 /* ---- LE CONSEIL : la seule page qui n'affiche pas une donnee mais un
    jugement. Une passe de cerveau -- periodique, ou demandee au bouton 1 --
@@ -2311,9 +2333,15 @@ static void show_ui(void)
         draw_status_bar();
         plein = (last_drawn_page != -2);
         last_drawn_page = -2;
-    } else {
-        /* une seule page : le tableau, et rien d'autre */
+    } else if (ui_page == PAGE_ASTUCE) {
         fb_oy = 0;
+        astuce_dessine(astuce_txt, astuce_src, astuce_quand, astuce_dispo);
+        plein = (last_drawn_page != ui_page) || (partiels >= 40);
+        last_drawn_page = ui_page;
+    } else {
+        /* pas de page 3 : tout le reste retombe sur le tableau */
+        fb_oy = 0;
+        ui_page = PAGE_MAITRE;
         anim_ph++;
         draw_app_maitre();
         plein = (last_drawn_page != ui_page) || (partiels >= 40);
@@ -2716,10 +2744,17 @@ static void tache_arrete(void)
         appui long = retour au tableau
 */
 
-/* bouton 1 court : redemander une lecture fraiche (meteo, capteurs) */
+/* bouton 1 court : redemander une lecture fraiche (meteo, capteurs).
+   Sur la page ASTUCE, il demande une autre astuce tout de suite. */
 static bool act_tableau_court(int n)
 {
-    if (n != 0) return false;              /* bouton 2 : rien a faire */
+    if (n != 0) return false;              /* bouton 2 : changement de page */
+    if (ui_page == PAGE_ASTUCE) {          /* une autre astuce, tout de suite */
+        astuce_demande = true;
+        ui_beep();
+        ESP_LOGI(TAG, "astuce : bouton 1 -> nouvelle lecture");
+        return true;
+    }
     meteo_force = true;                    /* lecture fraiche (la tache reseau) */
     ui_read_sensors();
     ui_beep();
@@ -2749,7 +2784,13 @@ static void bouton_court(int n)          /* n : 0 = bouton 1 (BOOT), 1 = bouton 
         return;
     }
     if (act_tableau_court(n)) return;
-    /* il n'y a plus de page a tourner : l'appui court ne fait rien de plus */
+    /* bouton 2 court : une page, puis l'autre (tableau <-> astuce) */
+    if (n == 1) {
+        ui_page = (ui_page == PAGE_ASTUCE) ? PAGE_MAITRE : PAGE_ASTUCE;
+        ESP_LOGI(TAG, "bouton 2 : page %s", ui_page == PAGE_ASTUCE ? "ASTUCE" : "TABLEAU");
+        show_ui();
+        return;
+    }
 }
 
 static void bouton_double(int n)
@@ -2988,7 +3029,7 @@ static esp_err_t h_bouton(httpd_req_t *req)
     }
     vTaskDelay(pdMS_TO_TICKS(500));            /* laisse la tache bouton agir */
     cJSON *r = cJSON_CreateObject();
-    cJSON_AddStringToObject(r, "page", "ACCUEIL");
+    cJSON_AddStringToObject(r, "page", ui_page == PAGE_ASTUCE ? "ASTUCE" : "ACCUEIL");
     cJSON_AddNumberToObject(r, "page_i", ui_page);
     return send_json(req, r);
 }
@@ -3144,7 +3185,7 @@ static volatile int ui_ticks = 0;      /* tours de la tache ui : 0 = tache morte
 /* ---- lectures reseau hors de la tache ecran ----
    Un TLS prend 3 a 20 s : fait ici, dans sa propre tache, l'ecran et les
    boutons ne se figent plus pendant un telechargement. */
-enum { NET_METEO = 1, NET_INFOS = 2, NET_YT = 3 };
+enum { NET_METEO = 1, NET_INFOS = 2, NET_YT = 3, NET_ASTUCE = 4 };
 static QueueHandle_t net_q = NULL;
 static volatile int net_meteo_ok = -1;   /* -1 = rien a dire, 0 = echec, 1 = reussi */
 
@@ -3166,6 +3207,7 @@ static void net_task(void *arg)
         case NET_METEO: net_meteo_ok = meteo_lire() ? 1 : 0; break;
         case NET_INFOS: infos_lire(); break;
         case NET_YT:    yt_lire(); break;
+        case NET_ASTUCE: astuce_lire(); break;
         default: break;
         }
         redraw_demande = true;           /* la donnee est arrivee : on redessine */
@@ -3220,6 +3262,15 @@ static void ui_task(void *arg)
         }
         /* la chaine YouTube n'est plus lue : son bloc a quitte l'ecran et
            personne d'autre ne consomme yt_titre (les champs restent dans /state) */
+        /* l'astuce du jour : une lecture par jour, ou a la demande */
+        if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) && !astuce_occupe &&
+            (astuce_jour != (int)(now / 86400) || astuce_demande) &&
+            (astuce_demande || astuce_essai_ms == 0 ||
+             esp_timer_get_time() / 1000 - astuce_essai_ms > 1800000)) {
+            astuce_demande = false;
+            astuce_occupe = true;
+            net_demande(NET_ASTUCE);
+        }
         /* les titres du moment : au demarrage puis toutes les 30 min, pour que
            le cerveau ait l'actualite du jour dans son contexte. */
         if ((xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT) &&
@@ -5837,6 +5888,113 @@ static int http_get_ex(const char *url, const char *ua, const char *cookie,
 static int http_get(const char *url, const char *ua, uint8_t *buf, int cap)
 {
     return http_get_ex(url, ua, NULL, buf, cap);
+}
+
+/* ---- L'ASTUCE DU JOUR : le top du jour de r/Twitch, sinon r/Kick ---------
+   Texte brut de Reddit (JSON), une seule lecture par jour, gardee en NVS.
+   On choisit l'entree "numero du jour % n" : une astuce differente chaque
+   jour, sans repasser par le reseau. */
+static void astuce_sauve(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("mino", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, "ast_txt", astuce_txt);
+    nvs_set_str(h, "ast_src", astuce_src);
+    nvs_set_str(h, "ast_quand", astuce_quand);
+    nvs_set_i32(h, "ast_jour", astuce_jour);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void astuce_charge(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("mino", NVS_READONLY, &h) != ESP_OK) return;
+    size_t n = sizeof(astuce_txt);
+    if (nvs_get_str(h, "ast_txt", astuce_txt, &n) != ESP_OK) astuce_txt[0] = 0;
+    n = sizeof(astuce_src);  nvs_get_str(h, "ast_src", astuce_src, &n);
+    n = sizeof(astuce_quand); nvs_get_str(h, "ast_quand", astuce_quand, &n);
+    {
+        int32_t j = -1;
+        if (nvs_get_i32(h, "ast_jour", &j) == ESP_OK) astuce_jour = (int)j;
+    }
+    nvs_close(h);
+    astuce_dispo = astuce_txt[0] != 0;
+    if (astuce_dispo)
+        ESP_LOGI(TAG, "astuce : '%s' (%s, %s)", astuce_txt, astuce_src, astuce_quand);
+}
+
+static const char *AST_MOIS[12] = { "JAN", "FEV", "MAR", "AVR", "MAI", "JUN",
+                                    "JUL", "AOU", "SEP", "OCT", "NOV", "DEC" };
+
+static bool astuce_lire(void)
+{
+    if (!(xEventGroupGetBits(wifi_eg) & WIFI_OK_BIT)) { astuce_occupe = false; return false; }
+    astuce_essai_ms = esp_timer_get_time() / 1000;
+    char *buf = (char *)heap_caps_malloc(64 * 1024, MALLOC_CAP_SPIRAM);
+    if (!buf) { ESP_LOGW(TAG, "astuce : plus de PSRAM"); astuce_occupe = false; return false; }
+
+    /* Reddit sert le JSON en 403 a un client qui n'est pas un navigateur, mais
+       son flux RSS passe : on lit les titres des entrees du jour. */
+    static const char *URLS[2] = { ASTUCE_URL1, ASTUCE_URL2 };
+    bool fait = false;
+    for (int u = 0; u < 2 && !fait; u++) {
+        int r = http_get(URLS[u], ASTUCE_UA, (uint8_t *)buf, 64 * 1024 - 1);
+        if (r <= 0) { ESP_LOGW(TAG, "astuce : %s -> %d", URLS[u], r); continue; }
+        buf[r] = 0;
+
+        static char titres[12][170];
+        int n = 0;
+        char *p = buf;
+        /* RSS classique (<item>) ou Atom (<entry>) : Reddit sert de l'Atom */
+        while (n < 12) {
+            char *a1 = strstr(p, "<item"), *a2 = strstr(p, "<entry");
+            char *a = (!a1) ? a2 : (!a2) ? a1 : (a1 < a2 ? a1 : a2);
+            if (!a) break;
+            p = a + 5;
+            char *t = strstr(p, "<title>");
+            char *f = t ? strstr(t, "</title>") : NULL;
+            if (t && f) {
+                int len = (int)(f - (t + 7));
+                if (len > 160) len = 160;
+                memcpy(titres[n], t + 7, (size_t)len);
+                titres[n][len] = 0;
+                char *cd = strstr(titres[n], "<![CDATA[");
+                if (cd) {
+                    memmove(titres[n], cd + 9, strlen(cd + 9) + 1);
+                    char *f2 = strstr(titres[n], "]]>");
+                    if (f2) *f2 = 0;
+                }
+                infos_nettoie(titres[n]);
+                if (strlen(titres[n]) > 12) n++;
+            }
+            if (f) p = f + 8;
+        }
+
+        if (n > 0) {
+            time_t now = time(NULL);
+            int jour = (int)(now / 86400);
+            int k = (jour > 0 ? jour : 0) % n;      /* une autre chaque jour */
+            snprintf(astuce_txt, sizeof(astuce_txt), "%s", titres[k]);
+            snprintf(astuce_src, sizeof(astuce_src), "%s", u == 0 ? "R/TWITCH" : "R/KICK");
+            struct tm ti;
+            localtime_r(&now, &ti);
+            snprintf(astuce_quand, sizeof(astuce_quand), "%d %s %02dH%02d",
+                     ti.tm_mday, AST_MOIS[(ti.tm_mon >= 0 && ti.tm_mon < 12) ? ti.tm_mon : 0],
+                     ti.tm_hour, ti.tm_min);
+            astuce_jour = jour;
+            astuce_dispo = true;
+            astuce_sauve();
+            ESP_LOGI(TAG, "astuce %d : '%s' (%s, %d entrees)", jour, astuce_txt, astuce_src, n);
+            fait = true;
+        } else {
+            ESP_LOGW(TAG, "astuce : aucune entree dans %s (%d o)", URLS[u], r);
+        }
+    }
+    free(buf);
+    astuce_occupe = false;
+    redraw_demande = true;
+    return fait;
 }
 
 /* va chercher les titres du moment et les met en forme pour l'ecran */
@@ -9273,6 +9431,10 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "rotation_s", (double)rotation_s);
     cJSON_AddNumberToObject(r, "matrix", (double)mtx_etape);   /* 0..3 pluie, 4 rapport */
     cJSON_AddStringToObject(r, "hist_sd_etat", hist_sd_pourquoi);
+    cJSON_AddStringToObject(r, "astuce", astuce_txt);
+    cJSON_AddStringToObject(r, "astuce_src", astuce_src);
+    cJSON_AddStringToObject(r, "astuce_quand", astuce_quand);
+    cJSON_AddNumberToObject(r, "astuce_jour", (double)astuce_jour);
     cJSON_AddBoolToObject(r, "voix_sortie", voix_sortie);
     cJSON_AddNumberToObject(r, "voix_dit_nb", (double)voix_dit_nb);
     cJSON_AddBoolToObject(r, "reponse_ouverte", rep_ouvert);
@@ -9346,7 +9508,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(r, "chrono_tts_ms", (double)chrono_tts_ms);
     cJSON_AddNumberToObject(r, "radio_etat", (double)radio_etat);
     cJSON_AddStringToObject(r, "radio_station", radios_n > 0 ? radios_nom[radio_sel] : "");
-    cJSON_AddStringToObject(r, "page", "ACCUEIL");
+    cJSON_AddStringToObject(r, "page", ui_page == PAGE_ASTUCE ? "ASTUCE" : "ACCUEIL");
     cJSON_AddStringToObject(r, "livre", livre_pret ? livre.nom : "");
     cJSON_AddStringToObject(r, "livre_fichier", livre_dernier);
     cJSON_AddNumberToObject(r, "livre_page", livre_pret ? (double)(livre.page + 1) : 0);
@@ -9670,7 +9832,8 @@ extern "C" void app_main(void)
     yt_charge();                       /* la chaine YouTube reglee une fois pour toutes */
 
     heure_charge();     /* l'heure d'avant tout de suite : plus de date fausse au demarrage */
-    timers_charge();    /* restaure les timers/alarmes */
+    timers_charge();
+    astuce_charge();    /* restaure les timers/alarmes */
 
     serial_start();     /* la console USB remplace le log par defaut */
     esp_log_level_set("i2c.master", ESP_LOG_NONE);   /* pas de flood si un capteur manque */

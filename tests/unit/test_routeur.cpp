@@ -23,6 +23,7 @@ static int ok = 0, ko = 0;
 
 /* ---------- ce que le firmware fournit d'habitude ---------- */
 #define PAGE_MAITRE 0
+#define PAGE_ASTUCE 1
 
 #define TAG "test"
 #define ESP_LOGI(...) ((void)0)
@@ -37,6 +38,7 @@ static int  ui_page;
 static int64_t geste_ms;
 static bool alarme_on, wake_busy, radio_etat, voix_etat, rep_ouvert;
 static bool meteo_force;
+static bool astuce_demande;
 
 /* compteurs d'appels */
 static int n_show, n_beep, n_tache, n_assist, n_capteurs;
@@ -75,7 +77,7 @@ static void remise(void)
     faux_us += 5000000;              /* les gardes de cadence sont loin derriere */
     ui_page = PAGE_MAITRE;
     alarme_on = wake_busy = radio_etat = voix_etat = rep_ouvert = false;
-    meteo_force = false;
+    meteo_force = astuce_demande = false;
     n_show = n_beep = n_tache = n_assist = n_capteurs = 0;
     n_rep_court = n_rep_long = n_rep_ferme = 0;
     geste_ms = 0;
@@ -98,11 +100,20 @@ int main(void)
     bouton_court(0);
     VERIF(n_show == 2 && n_capteurs == 2, "deux appuis rapproches : deux relectures, aucun perdu");
 
-    /* ---- bouton 2 court : plus rien a tourner ---- */
+    /* ---- bouton 2 court : une page, puis l'autre ---- */
     remise();
     bouton_court(1);
-    VERIF(n_show == 0 && n_capteurs == 0 && !meteo_force, "court 2 : rien ne bouge");
-    VERIF(ui_page == PAGE_MAITRE, "court 2 : on reste sur le tableau");
+    VERIF(ui_page == PAGE_ASTUCE && n_show == 1, "court 2 : passe a la page astuce");
+    VERIF(n_capteurs == 0 && !meteo_force, "court 2 : pas de relecture meteo");
+    remise();
+    ui_page = PAGE_ASTUCE;
+    bouton_court(1);
+    VERIF(ui_page == PAGE_MAITRE && n_show == 1, "court 2 depuis l'astuce : retour au tableau");
+    remise();
+    ui_page = PAGE_ASTUCE;
+    bouton_court(0);
+    VERIF(astuce_demande && n_show == 0, "astuce + court 1 : nouvelle astuce demandee");
+    VERIF(ui_page == PAGE_ASTUCE, "astuce + court 1 : on reste sur la page");
 
     /* ---- la sonnerie passe avant tout ---- */
     remise();

@@ -215,3 +215,62 @@ void tableau_dessine(const tableau_t *t)
         txt(3, 176, 4, "AGENDA LIBRE");
     }
 }
+
+/* ---------------------------------------------------------------- */
+/* page 2 : l'astuce de streaming du jour                            */
+/* ---------------------------------------------------------------- */
+
+/* remplissage mot a mot : renvoie le nombre de lignes posees */
+static int remplis(char lignes[][18], int max, int cols, const char *src)
+{
+    int n = 0;
+    const char *p = src;
+    while (*p && n < max) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        int len = (int)strlen(p);
+        int k;
+        if (len <= cols) {
+            k = len;
+        } else {
+            k = cols;
+            while (k > 6 && p[k] != ' ') k--;
+            if (k <= 6) k = cols;
+        }
+        snprintf(lignes[n], 18, "%.*s", k, p);
+        n++;
+        p += k;
+    }
+    return n;
+}
+
+void astuce_dessine(const char *texte, const char *source, const char *quand, bool dispo)
+{
+    static char lignes[9][18];
+
+    /* titre plus court qu'en corps 5 : sinon la source, a droite, passait
+       par-dessus le E de ASTUCE */
+    txt(3, 0, 4, "ASTUCE");                       /* 92 x 20 px */
+    if (source && source[0]) txt_r(197, 2, 3, source);   /* R/TWITCH, R/KICK */
+    txt(3, 26, 3, "STREAMING");
+    if (quand && quand[0]) {
+        char d[16];
+        snprintf(d, sizeof(d), "%.6s", quand);   /* "12 NOV" : la date suffit ici */
+        txt_r(197, 30, 3, d);
+    }
+    a_hline(2, 197, 50, 1);
+
+    if (!dispo || !texte || !texte[0]) {
+        txt(3, 62, 3, "PAS ENCORE");
+        txt(3, 84, 3, "D'ASTUCE LUE");
+        txt(3, 106, 3, "SUR LE WEB.");
+    } else {
+        int n = remplis(lignes, 7, 16, texte);    /* 16 signes par ligne, 7 lignes
+                                                     (la 8e touchait le pied) */
+        for (int i = 0; i < n; i++)
+            txt(3, 56 + i * 16, 3, lignes[i]);
+    }
+
+    /* le geste pour revenir : la page 2 ne se devine pas */
+    txt(3, 184, 3, "2=TABLEAU");
+}

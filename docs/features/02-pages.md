@@ -63,6 +63,34 @@ cycle) reste joignable par le web pour le clavier Wi-Fi.
 Depuis le 11/11, aucun geste n'ouvre plus le livre : la page unique ne le
 montre plus et son lecteur se pilote par le web.
 
+
+## Page 2 : l'astuce de streaming
+
+Le bouton 2 court bascule entre le tableau et cette page ; le bouton 1 court, sur
+elle, redemande une astuce tout de suite.
+
+    y 0    ASTUCE (corps 4) et, a droite, la source : R/TWITCH ou R/KICK
+    y 26   STREAMING a gauche, la date de lecture a droite
+    y 50   filet
+    y 56   le texte de l'astuce, 16 signes par ligne, 7 lignes maximum
+    y 184  2=TABLEAU (le geste pour revenir)
+
+D'où vient le texte : du **flux RSS du top du jour** de r/Twitch
+(`https://www.reddit.com/r/Twitch/top/.rss?t=day`), à défaut r/Kick. Reddit
+répond **403 en JSON** à un client qui n'est pas un navigateur ; son flux Atom,
+lui, passe (22999 octets au premier essai sur la carte). Le parseur accepte
+`<item>` comme `<entry>`.
+
+Fréquence : **une lecture par jour**, jamais plus.
+- `astuce_jour` (numéro de jour = epoch / 86400) est gardé en NVS : tant qu'il
+  est le jour courant, aucun accès réseau, la page 2 s'affiche hors ligne.
+- Les titres récupérés tournent : l'entrée choisie est `jour % nombre_d_entrées`,
+  donc une astuce différente chaque jour sans nouvelle lecture.
+- Après un échec, on réessaie au plus toutes les 30 minutes (`astuce_essai_ms`),
+  pour ne pas marteler le réseau (Reddit a répondu 429 en boucle lors de la
+  mise au point).
+- `/state` expose `astuce`, `astuce_src`, `astuce_quand`, `astuce_jour`.
+
 ## Comment c'est fait
 
 - `main/tableau.h` définit `tableau_t` (des données, aucun pointeur vers le
