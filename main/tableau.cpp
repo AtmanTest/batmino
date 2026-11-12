@@ -126,19 +126,21 @@ static void deux_lignes(char *l1, char *l2, const char *src, int cols)
     }
 }
 
-/* petites barres de signal (10x7 px) : l'icone wifi de art.h est trop haute
-   pour l'en-tete */
-static void mini_wifi(int x, int y, bool on, int rssi)
+/* l'icone wifi : trois arcs et le point, comme sur un telephone. Le nombre
+   d'arcs donne le niveau ; hors ligne une barre diagonale barre le tout.
+   Dessinee assez grande (34 x 22 px) pour se voir du premier coup d'oeil :
+   la version precedente, 9 x 6 px dans un coin, etait invisible. */
+static void icone_wifi(int cx, int cy, bool on, int rssi)
 {
     int niv = 0;
     if (on) niv = (rssi >= -60) ? 3 : (rssi >= -75) ? 2 : 1;
-    static const int H[3] = { 2, 4, 6 };
+    static const int R[3] = { 7, 13, 19 };
+    a_disc(cx, cy, 2, 1);
+    /* hors ligne : les trois arcs restent dessines, c'est la barre qui dit
+       "pas de wifi" — sans eux il ne resterait qu'un point barre */
     for (int i = 0; i < 3; i++)
-        if (i < niv)
-            for (int dy = 0; dy < H[i]; dy++)
-                for (int dx = 0; dx < 2; dx++)
-                    a_px(x + i * 3 + dx, y + 5 - dy, 1);
-    if (!on) a_hline(x - 1, x + 9, y + 2, 1);   /* barre = hors ligne */
+        if (!on || i < niv) a_arc(cx, cy, R[i], 40, 140, 2);
+    if (!on) a_seg(cx - 15, cy - 22, cx + 15, cy + 4, 2);
 }
 
 /* ---------------------------------------------------------------- */
@@ -155,7 +157,7 @@ void tableau_dessine(const tableau_t *t)
     /* ============ l'heure, en corps 7 (21 x 35 px par signe) ========== */
     snprintf(b, sizeof(b), "%02d:%02d", t->heure % 24, t->minute % 60);
     txt(2, 0, 7, b);                                  /* "18:54" : 133 x 35 px */
-    mini_wifi(190, 8, t->wifi, t->rssi);              /* le wifi, sans un mot */
+    icone_wifi(180, 22, t->wifi, t->rssi);            /* l'etat du wifi, en clair */
 
     /* la date, sur une ligne, en corps 3 */
     snprintf(b, sizeof(b), "%s %d %s",

@@ -186,7 +186,7 @@ static int conso_mw(void);   /* consommation estimee, lue par le tableau de bord
 static char ia_cle[128] = "";        /* cle du cerveau, modifiable a chaud (NVS) */
 static char ia_base[128] = "https://api.deepseek.com/chat/completions";
 static char ia_mod[64]   = "deepseek-flash";   /* DeepSeek V4.1 Flash */
-#define APP_VER "2026-11-11 purge"
+#define APP_VER "2026-11-11 wifi-visible"
 static char ia_brut[300];                      /* derniere reponse brute du modele */
 static int  chrono_stt_ms = 0, chrono_llm_ms = 0, chrono_tts_ms = 0, chrono_ms = 0;
 
@@ -1793,14 +1793,28 @@ static int sys_bat_pct_cache = -1;
 static int sys_bat_mv(void)
 {
     if (!sys_adc_init) {
-        sys_adc_init = true;
         adc_oneshot_unit_init_cfg_t uc = {};
         uc.unit_id = ADC_UNIT_1;
-        if (adc_oneshot_new_unit(&uc, &sys_adc) != ESP_OK) { sys_adc = NULL; return -1; }
+        esp_err_t e = adc_oneshot_new_unit(&uc, &sys_adc);
+        if (e != ESP_OK) {
+            /* on ne verrouille plus l'echec : la mesure sera retentee au
+               prochain appel (avant, un seul echec au demarrage rendait la
+               batterie invisible jusqu'au reboot) */
+            sys_adc = NULL;
+            ESP_LOGW(TAG, "batterie : unite ADC indisponible (%s)", esp_err_to_name(e));
+            return -1;
+        }
         adc_oneshot_chan_cfg_t cc = {};
         cc.atten = ADC_ATTEN_DB_12;
         cc.bitwidth = ADC_BITWIDTH_DEFAULT;
-        if (adc_oneshot_config_channel(sys_adc, ADC_CHANNEL_3, &cc) != ESP_OK) { sys_adc = NULL; return -1; }
+        e = adc_oneshot_config_channel(sys_adc, ADC_CHANNEL_3, &cc);
+        if (e != ESP_OK) {
+            adc_oneshot_del_unit(sys_adc);
+            sys_adc = NULL;
+            ESP_LOGW(TAG, "batterie : canal ADC indisponible (%s)", esp_err_to_name(e));
+            return -1;
+        }
+        sys_adc_init = true;
     }
     if (!sys_adc) return -1;
     int somme = 0, n = 0;
@@ -2220,7 +2234,14 @@ static void tableau_maitre(void)
     }
 
     /* ---- energie ---- */
-    t.bat_pct = sys_bat_pct(sys_bat_mv());         /* -1 : USB, pas de batterie */
+    /* la mesure alimente aussi /state : depuis que la page SYSTEM est partie,
+       c'est le seul endroit qui lit l'ADC de la batterie */
+    {
+        int mv = sys_bat_mv();
+        sys_bat_mv_cache  = mv;
+        sys_bat_pct_cache = sys_bat_pct(mv);
+        t.bat_pct = sys_bat_pct_cache;             /* -1 : USB, pas de batterie */
+    }
 
     /* ---- capteur interne (SHTC3) ---- */
     t.capteur  = ui_shtc_ok;
