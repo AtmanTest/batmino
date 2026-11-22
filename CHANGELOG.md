@@ -1,5 +1,25 @@
 # Journal des versions
 
+## 4.1.0 — 2026-11-22 — 37 écrans et Wi-Fi de démonstration
+
+### Ajouté
+- **37 écrans** : l'accueil, puis pour chacun des 18 modules un **intertitre
+  descriptif** (grand titre 4 à 6 fois la police de base, une phrase, une note
+  encadrée) suivi de sa page. L'intertitre se traverse avec B1 ou B2×2.
+- Wi-Fi : **trois réseaux** essayés dans l'ordre (hotspot de démonstration
+  d'abord, puis les deux réseaux de la maison), bascule automatique en cas de
+  perte, et affichage du **SSID réellement connecté** au lieu du nom supposé.
+- Tests : 599 vérifications (les 37 écrans sont rendus et testés, chaque
+  module vérifie la présence de son intertitre).
+
+### Modifié
+- Les gestes de page s'appuient sur le **module** et non plus sur un numéro
+  d'écran : ajouter un module ou un intertitre ne décale plus les actions.
+- Le pied de page des intertitres indique « B2 : CONTINUER ».
+
+### Limites
+- Toujours pas de carte branchée : flash, dalle et Wi-Fi réel non exécutés.
+
 ## 4.0.1 — 2026-11-22 — documentation de la démonstration
 
 - `docs/DEMO-ENTRETIEN.md` : parcours de 3 minutes, gestes et réponses aux

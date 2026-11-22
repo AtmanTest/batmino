@@ -18,6 +18,22 @@
 #define FDJ_ECRAN_W 200
 #define FDJ_ECRAN_H 200
 
+/* --- modules du parcours : chacun a son intertitre + sa page --------- *
+ * 37 ecrans : accueil + (intertitre + page) x 18 modules.              */
+typedef enum {
+    FDJ_M_ACCUEIL = 0,
+    FDJ_M_PARIS, FDJ_M_LOTO, FDJ_M_HIST, FDJ_M_GAINS, FDJ_M_NEWS,
+    FDJ_M_COUPON, FDJ_M_RESP, FDJ_M_STATS, FDJ_M_STORIES, FDJ_M_TESTS,
+    FDJ_M_ARCHI, FDJ_M_PERF, FDJ_M_RAM, FDJ_M_COMPTE, FDJ_M_PROFILS,
+    FDJ_M_ACCES, FDJ_M_RGPD, FDJ_M_REGLES,
+    FDJ_M_NB
+} fdj_module_t;
+
+int  fdj_ecran_module(int page);        /* module affiche par cet ecran     */
+bool fdj_ecran_est_intertitre(int page);
+int  fdj_module_page(int module);       /* page de contenu d'un module      */
+const char *fdj_module_nom(int module); /* nom court du module              */
+
 /* ce que l'ecran a besoin de savoir du monde, rassemble par l'appli */
 typedef struct {
     int page, curseur;         /* page affichee et item sous le curseur */

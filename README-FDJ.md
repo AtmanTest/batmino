@@ -1,7 +1,7 @@
-# FDT 4.0.0 — BATMino x FDJ (maquette d'entretien)
+# FDT 4.1.0 — BATMino x FDJ (maquette d'entretien)
 
 Firmware complet pour la carte **BATMino** (ESP32-S3, e-paper 200×200, deux
-boutons, micro SD, wifi) : **20 écrans** autour de l'univers FDJ, navigation
+boutons, micro SD, wifi) : **37 écrans** autour de l'univers FDJ : un intertitre descriptif avant chaque module, navigation
 à deux boutons, argent réel du modèle, scores **en direct**, tests sur le PC.
 
 C'est une **maquette indépendante de démonstration** : aucun compte FDJ,
@@ -17,6 +17,7 @@ L'ancien Mino (compagnon, assistant vocal) reste disponible :
 | # | Écran | Ce qu'il montre | Source des données |
 |---|------|-----------------|--------------------|
 | 1 | ACCUEIL FDJ | identité, solde de démo, profil, état du direct | état local + réseau |
+| — | *intertitre* | grand titre + phrase avant **chaque** module | — |
 | 2 | **ANALYSE & DECISION** | intertitre éditorial du module 01 | — |
 | 3 | PARIS SPORTIFS | top 10, proba du modèle, âge de la donnée | scores en direct |
 | 4 | LOTO | 3 grilles + 3 faits **exacts** sur les chances | générateur local |
@@ -68,7 +69,7 @@ main/
   fdj_model.cpp   métier pur : argent, profils, hasard, Poisson, loto   (testé PC)
   fdj_parse.cpp   flux : TheSportsDB (JSON), franceinfo (RSS)           (testé PC)
   fdj_nav.cpp     gestes → intentions                                   (testé PC)
-  fdj_ui.cpp      20 écrans en 1 bit                                    (testé PC)
+  fdj_ui.cpp      37 écrans en 1 bit                                    (testé PC)
   art.cpp         primitives de dessin (partagées hôte/carte)
   geste.h         machine à gestes (inchangée, déjà éprouvée)
 ```
@@ -163,7 +164,9 @@ ne contient aucun secret.
 * Un seul son : un clic de 25 ms, désactivable (plus de jingle ni de sons
   montants/descendants).
 * Le Wi-Fi est forcé en **2,4 GHz** (le S3 ne voit pas le 5 GHz) ; le réseau
-  de démonstration doit être un SSID 2,4 GHz.
+  de démonstration doit être un SSID 2,4 GHz. Trois réseaux sont essayés dans
+  l'ordre (hotspot de démo, puis deux secours) ; sur un partage iPhone,
+  activer « Maximiser la compatibilité ».
 * Tests carte (flash, réseau réel, mesures sur dalle) : **non exécutés dans
   cette livraison** si aucune carte n'est branchée ; voir `docs/RECETTE.md`.
 

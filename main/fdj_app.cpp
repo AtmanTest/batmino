@@ -83,12 +83,21 @@ static volatile int  g_page_demande = -1;
 static volatile bool g_forcer_live;   /* B2x2 page paris : vraie requete */
 static volatile bool g_forcer_news;   /* B2x2 page news : vraie requete */
 
-/* --- indices de pages (0 = accueil). L'ordre est celui du parcours. --- */
+/* --- modules (chaque module = un intertitre + une page) ------------- */
 enum {
-    P_ACCUEIL = 0, P_INTER, P_PARIS, P_LOTO, P_HIST, P_GAINS, P_NEWS,
-    P_COUPON, P_RESP, P_STATS, P_STORIES, P_TESTS, P_ARCHI, P_PERF,
-    P_RAM, P_COMPTE, P_PROFILS, P_ACCES, P_RGPD, P_REGLES
+    P_ACCUEIL = FDJ_M_ACCUEIL, P_PARIS = FDJ_M_PARIS, P_LOTO = FDJ_M_LOTO,
+    P_HIST = FDJ_M_HIST, P_GAINS = FDJ_M_GAINS, P_NEWS = FDJ_M_NEWS,
+    P_COUPON = FDJ_M_COUPON, P_RESP = FDJ_M_RESP, P_STATS = FDJ_M_STATS,
+    P_STORIES = FDJ_M_STORIES, P_TESTS = FDJ_M_TESTS, P_ARCHI = FDJ_M_ARCHI,
+    P_PERF = FDJ_M_PERF, P_RAM = FDJ_M_RAM, P_COMPTE = FDJ_M_COMPTE,
+    P_PROFILS = FDJ_M_PROFILS, P_ACCES = FDJ_M_ACCES, P_RGPD = FDJ_M_RGPD,
+    P_REGLES = FDJ_M_REGLES
 };
+
+/* l'ecran courant est un intertitre : le geste "decider" avance d'un cran */
+static bool sur_intertitre(void) { return fdj_ecran_est_intertitre(nav.page); }
+static int  module_courant(void) { return fdj_ecran_module(nav.page); }
+static void aller_module(int m) { nav.page = (uint8_t)fdj_module_page(m); nav.curseur = 0; }
 
 /* detail d'un pari (page historique) : plein ecran, toute action le ferme */
 static bool    g_detail;
@@ -498,7 +507,7 @@ static void efface_tout(void)
     grilles_genere();
     g_detail = false;
     g_gains_detail = false;
-    fdj_nav_init(&nav, P_ACCUEIL, 0);
+    fdj_nav_init(&nav, 0, 0);
     fdj_nav_mode(&nav, FDJ_MODE_CODE);      /* on repart de l'ecran de code */
     dit("DONNEES EFFACEES");
     son_clic();
@@ -565,7 +574,7 @@ static bool coupon_valide(void)
     etat_sauve();
     dit(msg);
     son_clic();
-    nav.page = P_HIST;             /* l'historique qui vient de se remplir */
+    aller_module(P_HIST);          /* l'historique qui vient de se remplir */
     nav.curseur = 0;
     etat.hist_off = 0;
     return true;
@@ -584,13 +593,18 @@ static void detail_ouvre(void)
 
 static void action_cocher(void)
 {
-    switch (nav.page) {
-    case P_ACCUEIL:
-        nav.page = P_INTER; nav.curseur = 0;
+    if (sur_intertitre()) {          /* un intertitre se traverse, il ne bloque pas */
+        nav.page = (uint8_t)(nav.page + 1);
+        nav.curseur = 0;
+        dit("MODULE SUIVANT");
         son_clic();
-        break;
-    case P_INTER:
-        nav.page = P_PARIS; nav.curseur = 0;
+        etat_sauve();
+        return;
+    }
+    switch (module_courant()) {
+    case P_ACCUEIL:
+        nav.page = (uint8_t)(nav.page + 1);   /* intertitre du module 01 */
+        nav.curseur = 0;
         son_clic();
         break;
     case P_PARIS: {
@@ -728,9 +742,16 @@ static void action_cocher(void)
 
 static void action_page(void)
 {
-    switch (nav.page) {
-    case P_ACCUEIL: nav.page = P_INTER; nav.curseur = 0; son_clic(); break;
-    case P_INTER:   nav.page = P_PARIS; nav.curseur = 0; son_clic(); break;
+    if (sur_intertitre()) {
+        nav.page = (uint8_t)(nav.page + 1);
+        nav.curseur = 0;
+        dit("MODULE SUIVANT");
+        son_clic();
+        etat_sauve();
+        return;
+    }
+    switch (module_courant()) {
+    case P_ACCUEIL: nav.page = (uint8_t)(nav.page + 1); nav.curseur = 0; son_clic(); break;
     case P_PARIS:
         g_forcer_live = true;              /* vraie requete reseau, pas un recalcul */
         dit("ACTUALISATION DES SCORES...");
@@ -892,16 +913,16 @@ static void app_tache(void *arg)
                 switch (a) {
                 case FDJ_ACT_COCHER:   action_cocher(); break;
                 case FDJ_ACT_DECOCHER: {
-                    if (nav.page == P_PARIS) {
+                    if (module_courant() == P_PARIS) {
                         etat.sel_cochee &= (uint16_t)~(1u << nav.curseur);
                         dit("SELECTION RETIREE"); son_clic();
-                    } else if (nav.page == P_LOTO && nav.curseur < FDJ_GRILLE_MAX) {
+                    } else if (module_courant() == P_LOTO && nav.curseur < FDJ_GRILLE_MAX) {
                         etat.grille_cochee &= (uint8_t)~(1u << nav.curseur);
                         dit("GRILLE RETIREE"); son_clic();
-                    } else if (nav.page == P_RESP && nav.curseur < 5) {
+                    } else if (module_courant() == P_RESP && nav.curseur < 5) {
                         etat.sel_cochee &= (uint16_t)~(1u << (8 + nav.curseur));
                         dit("REPONSE EFFACEE"); son_clic();
-                    } else if (nav.page == P_PROFILS && nav.curseur < etat.nb_profils) {
+                    } else if (module_courant() == P_PROFILS && nav.curseur < etat.nb_profils) {
                         /* suppression d'un profil non actif : confirmation */
                         if (nav.curseur == etat.profil_actif) {
                             dit("PROFIL ACTIF : CHANGEZ D'ABORD"); son_clic();
@@ -911,7 +932,7 @@ static void app_tache(void *arg)
                             fdj_nav_mode(&nav, FDJ_MODE_CONFIRME);
                             son_clic();
                         }
-                    } else if (nav.page == P_COUPON) {
+                    } else if (module_courant() == P_COUPON) {
                         etat.sel_cochee = 0; etat.grille_cochee = 0;
                         dit("COUPON VIDE"); son_clic();
                     } else {
@@ -953,7 +974,8 @@ static void app_tache(void *arg)
             g_rafraichir = false;
             affiche(false);
         } else if (mn != dernier_minute && nav.mode == FDJ_MODE_NAV &&
-                   (nav.page == P_ACCUEIL || nav.page == P_RESP)) {
+                   (!sur_intertitre() &&
+                    (module_courant() == P_ACCUEIL || module_courant() == P_RESP))) {
             dernier_minute = mn;
             affiche(false);
         }
@@ -968,6 +990,39 @@ static void app_tache(void *arg)
 static EventGroupHandle_t wifi_eg;
 #define WIFI_CONNU_BIT 0x1
 
+/* Reseaux essayes dans l'ordre : celui de la demo d'abord, puis les
+   secours de la maison. Tous doivent etre en 2,4 GHz (le S3 ne voit pas
+   le 5 GHz ; sur un partage iPhone, activer "Maximiser la compatibilite"). */
+typedef struct { const char *ssid, *pass; } wifi_reseau_t;
+static const wifi_reseau_t g_reseaux[] = {
+    { WIFI_SSID, WIFI_PASS },
+#ifdef WIFI_SSID_ALT
+    { WIFI_SSID_ALT, WIFI_PASS_ALT },
+#endif
+#ifdef WIFI_SSID_ALT2
+    { WIFI_SSID_ALT2, WIFI_PASS_ALT2 },
+#endif
+};
+static const int g_reseaux_n = (int)(sizeof(g_reseaux) / sizeof(g_reseaux[0]));
+static int  g_reseau_idx;
+static char g_ssid_connecte[33];
+
+/* bascule sur le reseau suivant (secours), sans bloquer l'ecran */
+static void wifi_reseau_suivant(void)
+{
+    g_reseau_idx = (g_reseau_idx + 1) % g_reseaux_n;
+    wifi_config_t wc = {};
+    snprintf((char *)wc.sta.ssid, sizeof(wc.sta.ssid), "%s", g_reseaux[g_reseau_idx].ssid);
+    snprintf((char *)wc.sta.password, sizeof(wc.sta.password), "%s", g_reseaux[g_reseau_idx].pass);
+    wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    esp_wifi_connect();
+    ESP_LOGW(TAG, "wifi : essai du reseau de secours %d/%d", g_reseau_idx + 1, g_reseaux_n);
+    g_rafraichir = true;
+}
+
 static void wifi_evenement(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)data;
@@ -976,12 +1031,16 @@ static void wifi_evenement(void *arg, esp_event_base_t base, int32_t id, void *d
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         g_wifi = false;
         if (wifi_eg) xEventGroupClearBits(wifi_eg, WIFI_CONNU_BIT);
-        esp_wifi_connect();
+        wifi_reseau_suivant();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         g_wifi = true;
         if (wifi_eg) xEventGroupSetBits(wifi_eg, WIFI_CONNU_BIT);
         wifi_ap_record_t ap;
-        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) g_rssi = ap.rssi;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            g_rssi = ap.rssi;
+            snprintf(g_ssid_connecte, sizeof(g_ssid_connecte), "%s", (const char *)ap.ssid);
+            g_ssid = g_ssid_connecte;
+        }
         ESP_LOGI(TAG, "wifi connecte : %s (%d dBm)", g_ssid ? g_ssid : "?", g_rssi);
         fdj_app_reseau_pret();
         g_rafraichir = true;
@@ -1002,9 +1061,10 @@ static void wifi_demarre(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                         wifi_evenement, NULL, NULL));
 
+    g_reseau_idx = 0;
     wifi_config_t wc = {};
-    snprintf((char *)wc.sta.ssid, sizeof(wc.sta.ssid), "%s", WIFI_SSID);
-    snprintf((char *)wc.sta.password, sizeof(wc.sta.password), "%s", WIFI_PASS);
+    snprintf((char *)wc.sta.ssid, sizeof(wc.sta.ssid), "%s", g_reseaux[0].ssid);
+    snprintf((char *)wc.sta.password, sizeof(wc.sta.password), "%s", g_reseaux[0].pass);
     wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     /* 2,4 GHz obligatoire : le S3 ne voie pas le 5 GHz. On balaie tous les
        canaux, on trie par signal, et on force la bande 2,4 GHz au driver. */

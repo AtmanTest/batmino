@@ -79,15 +79,23 @@ static void decor(void)
 /* ---- 1. vingt ecrans, dont l'intertitre a sa place ---- */
 static void test_vingt_ecrans(void)
 {
-    OK(FDJ_PAGES == 20, "20 ecrans dans le parcours");
-    OK(strcmp(fdj_page_titre(1), "ANALYSE & DECISION") == 0, "intertitre en page 2");
+    OK(FDJ_PAGES == 37, "37 ecrans : accueil + 18 x (intertitre, page)");
+    OK(fdj_ecran_est_intertitre(1), "l'ecran 2 est un intertitre");
+    OK(strcmp(fdj_page_titre(1), "PARIS SPORTIFS") == 0, "intertitre du module paris");
+    OK(strcmp(fdj_page_titre(2), "PARIS SPORTIFS") == 0, "page de contenu du module");
     OK(fdj_page_items(1, &v) == 1, "l'intertitre a un seul item");
+    int inters = 0;
+    for (int p = 1; p < FDJ_PAGES; p++) if (fdj_ecran_est_intertitre(p)) inters++;
+    OK(inters == 18, "un intertitre avant chacun des 18 modules");
+    for (int m = 1; m < FDJ_M_NB; m++)
+        if (!fdj_ecran_est_intertitre(fdj_module_page(m) - 1))
+            OKF(0, "module %d sans intertitre", m);
 
     v.page = 1; v.curseur = 0;
     memset(fbm, 0xFF, sizeof(fbm));
     fdj_ui_dessine(&v, fbm);
     OK(noirs_zone(0, 30, 199, 110) > 300, "l'intertitre affiche un grand titre");
-    OK(noirs_zone(0, 22, 199, 40) < 900, "l'intertitre laisse de l'espace blanc");
+    OK(noirs_zone(0, 22, 199, 40) < 1200, "l'intertitre laisse de l'espace blanc");
 
     /* les 20 pages existent et se dessinent */
     int vues = 0;
@@ -97,7 +105,7 @@ static void test_vingt_ecrans(void)
         fdj_ui_dessine(&v, fbm);
         if (noirs_zone(0, 0, 199, 199) > 150) vues++;
     }
-    OK(vues == FDJ_PAGES, "les 20 pages produisent une image");
+    OK(vues == FDJ_PAGES, "les 37 ecrans produisent une image");
 
     /* l'aide du pied est propre a la page, pas un texte unique recopie */
     int differentes = 0;
@@ -114,8 +122,8 @@ static void test_coupon_plein(void)
     /* 8 selections sportives + 2 grilles = le pire cas */
     e.sel_cochee = 0x00FF;
     e.grille_cochee = 0x0003;
-    v.page = 7; v.curseur = 0;
-    int items = fdj_page_items(7, &v);
+    v.page = (uint8_t)fdj_module_page(FDJ_M_COUPON); v.curseur = 0;
+    int items = fdj_page_items(v.page, &v);
     OK(items == 12, "10 selections + 2 actions = 12 items");
 
     int positions_ok = 0;
@@ -151,9 +159,9 @@ static void test_historique_detail(void)
         fdj_pari_ajoute(&e, "PARI DE TEST POUR LE DETAIL", "ABC", 200, 450,
                         T0 - (int64_t)i * 86400, FDJ_JEU_SPORT, FDJ_PARI_EN_COURS);
 
-    v.page = 4;
+    v.page = (uint8_t)fdj_module_page(FDJ_M_HIST);
     v.curseur = 0;
-    OK(fdj_page_items(4, &v) == FDJ_HIST_PAGE, "5 paris + l'item de defilement = 6 items");
+    OK(fdj_page_items(v.page, &v) == FDJ_HIST_PAGE, "5 paris + l'item de defilement = 6 items");
 
     /* le detail est un vrai ecran, et il depend du pari */
     int idx0 = fdj_hist_index_recence(&e, 0);
@@ -168,16 +176,16 @@ static void test_historique_detail(void)
 
     /* pagination : le curseur sur le 7e item fait defiler l'anneau */
     e.hist_off = FDJ_HIST_PAGE;
-    OK(fdj_page_items(4, &v) == 6, "page 2 de l'historique : 6 paris");
+    OK(fdj_page_items(v.page, &v) == 6, "page 2 de l'historique : 6 paris");
     e.hist_off = FDJ_HIST_PAGE * 2 - 1;
-    OK(fdj_page_items(4, &v) == 1, "derniere page : 1 pari, pas de defilement");
+    OK(fdj_page_items(v.page, &v) == 1, "derniere page : 1 pari, pas de defilement");
     e.hist_off = 0;
 }
 
 /* ---- 4. RAM : capacites reelles, action cablee, plus de faux swap ---- */
 static void test_ram(void)
 {
-    v.page = 14;
+    v.page = (uint8_t)fdj_module_page(FDJ_M_RAM);
     v.curseur = 0;
     memset(fbm, 0xFF, sizeof(fbm));
     fdj_ui_dessine(&v, fbm);
@@ -190,7 +198,7 @@ static void test_ram(void)
     fdj_ui_dessine(&sans, fbm);
     int sans_totaux = noirs_zone(0, 20, 199, 120);
     OK(avec > 0 && sans_totaux > 0, "la page memoire se dessine avec ou sans totaux");
-    OK(strstr(fdj_page_aide(14), "MESURES") != NULL, "l'action REFAIRE LES MESURES est annoncee");
+    OK(strstr(fdj_page_aide(v.page), "MESURES") != NULL, "l'action REFAIRE LES MESURES est annoncee");
 }
 
 /* ---- 5. profils : suppression reelle, refus du profil actif ---- */
@@ -236,7 +244,7 @@ static void test_gros_texte(void)
         e.gros_texte = false;
         if (memcmp(petit, grand, ART_FB_LEN) != 0) changees++;
     }
-    OKF(changees >= 12, "le gros texte change %d pages sur %d", changees, FDJ_PAGES);
+    OKF(changees >= 12, "le gros texte change %d ecrans sur %d", changees, FDJ_PAGES);
 
     /* et il ne casse pas la navigation : chaque page garde ses items */
     e.gros_texte = true;
@@ -327,8 +335,8 @@ static void test_version_et_options(void)
 /* ---- 10. regles FDJ : trois items, un curseur visible ---- */
 static void test_regles_curseur(void)
 {
-    v.page = 19;
-    OK(fdj_page_items(19, &v) == 3, "trois items declares");
+    v.page = (uint8_t)fdj_module_page(FDJ_M_REGLES);
+    OK(fdj_page_items(v.page, &v) == 3, "trois items declares");
     uint8_t a[ART_FB_LEN], b[ART_FB_LEN];
     v.curseur = 0; fdj_ui_dessine(&v, a);
     v.curseur = 1; fdj_ui_dessine(&v, b);

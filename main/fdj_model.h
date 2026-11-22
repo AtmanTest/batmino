@@ -24,7 +24,7 @@
 /* ---------------------------------------------------------------- */
 /* limites (taillees pour 320 Ko de RAM interne + 8 Mo de PSRAM)     */
 /* ---------------------------------------------------------------- */
-#define FDJ_PAGES            20
+#define FDJ_PAGES            37
 #define FDJ_PROFILS_MAX       4
 #define FDJ_HIST_MAX         32
 #define FDJ_HIST_PAGE         6     /* 6 paris visibles par page d'historique */
@@ -131,7 +131,7 @@ typedef struct {
 
 #define FDJ_ETAT_VERSION 4
 #define FDJ_MAGIC 0x46444A31u    /* "FDJ1" */
-#define FDJ_VERSION "4.0.1"      /* doit suivre le fichier VERSION */
+#define FDJ_VERSION "4.1.0"      /* doit suivre le fichier VERSION */
 
 /* ---------------------------------------------------------------- */
 /* donnees vivantes : matchs en direct + titres + mesures           */

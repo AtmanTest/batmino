@@ -255,28 +255,131 @@ static void p_accueil(const fdj_vue_t *v)
 }
 
 /* ---------------------------------------------------------------- */
-/* page 2 — INTERTITRE EDITORIAL (nouveau)                          */
+/* intertitres : une page de transition avant CHAQUE module          */
 /* ---------------------------------------------------------------- */
+
+/* jeux de caracteres par module : deux lignes courtes, une phrase */
+typedef struct {
+    const char *haut;      /* grande ligne 1 */
+    const char *bas;       /* grande ligne 2 (peut etre vide) */
+    const char *phrase;    /* une phrase, coupee en 2 ou 3 lignes */
+    const char *note;      /* rappel court en bas */
+} inter_t;
+
+static const inter_t INTER[FDJ_M_NB] = {
+    { "", "", "", "" },                                             /* accueil */
+    { "ANALYSE", "ET DECISION", "DES SCORES AUX PROBABILITES DU MODELE",
+      "PROBABILITE N'EST PAS UNE COTE" },
+    { "LE HASARD", "SANS MENTIR", "TROIS GRILLES, UNE CHANCE SUR 19 MILLIONS",
+      "GRILLE EQUILIBREE = MEME CHANCE" },
+    { "LA TRACE", "DE CHAQUE PARI", "CODE, JEU, MISE, GAIN : TOUT EST GARDE",
+      "LE DETAIL S'OUVRE VRAIMENT" },
+    { "L'ARGENT", "SANS ARRONDIR", "MISES, GAINS CONFIRMES, NET PAR JOUR",
+      "UN PARI EN COURS N'EST PAS UN GAIN" },
+    { "LE FIL", "EN CONTINU", "TITRES REELS, HORODATES, JAMAIS INVENTES",
+      "PAS DE RESEAU = N.D." },
+    { "LE COUPON", "", "CHOISIR, VERIFIER, VALIDER",
+      "REFUS MOTIVE, RIEN N'EST DEBITE" },
+    { "GARDER", "LE CONTROLE", "DES LIMITES QUI S'APPLIQUENT VRAIMENT",
+      "PAUSE 24 H AVEC ECHEANCE REELLE" },
+    { "LES CHIFFRES", "EXACTS", "PROBABILITES, COTE IMPLICITE, HISTORIQUE",
+      "AUCUN TRJ INVENTE" },
+    { "LE CAHIER", "DES CHARGES", "SIX HISTOIRES ET LEURS CRITERES",
+      "LA PAGE 12 MONTRE LES PREUVES" },
+    { "LES PREUVES", "PAS LES PROMESSES", "VERIFICATIONS REELLES, DATES, RELANCEES",
+      "AUCUNE PAGE LIVREE SANS TESTS" },
+    { "SOUS", "LE CAPOT", "LE MEME CODE SUR LA CARTE ET SUR LE PC",
+      "TAILLES MESUREES, PAS ESTIMEES" },
+    { "VITESSE", "ET SECURITE", "MESURES LIVE, TLS VERIFIE",
+      "AUCUN SECRET AFFICHE" },
+    { "LA MEMOIRE", "COMPTEE", "HEAP, PSRAM, CAPACITES REELLES",
+      "PAS DE FAUX SWAP" },
+    { "MON COMPTE", "ET MES REGLAGES", "RESEAU, SON, CODE PROTEGE",
+      "LE CODE N'EST JAMAIS AFFICHE" },
+    { "QUATRE", "PROFILS", "PLAFONDS ET SOLDES SEPARES",
+      "CHAQUE PROFIL A SON BUDGET" },
+    { "POUR", "TOUS", "GROS TEXTE, CONTRASTE, CLIC",
+      "AUCUNE INFO PAR LA COULEUR" },
+    { "MES", "DONNEES", "CE QUI EST STOCKE, CE QUI SORT",
+      "EFFACEMENT AVEC CONFIRMATION" },
+    { "LES REGLES", "DU JEU", "FAMILLES, CONDITIONS, LIMITES",
+      "MAQUETTE NON OFFICIELLE" },
+};
+
+/* plus grande taille qui fait tenir les deux lignes dans maxw */
+static int fit_s(const char *a, const char *b, int maxw)
+{
+    for (int s = 6; s >= 3; s--) {
+        int wa = largeur(s, a), wb = b ? largeur(s, b) : 0;
+        if (wa <= maxw && wb <= maxw) return s;
+    }
+    return 3;
+}
+
+/* phrase coupee a l'espace, sur maxlignes, sans jamais trancher un mot */
+static void phrase_wrap(int x, int y, int s, int maxw, const char *t, int maxlignes, int interligne)
+{
+    char buf[160];
+    snprintf(buf, sizeof(buf), "%s", t ? t : "");
+    char *p = buf;
+    int maxc = maxw / (4 * s);
+    for (int ligne = 0; ligne < maxlignes && *p; ligne++) {
+        int n = (int)strlen(p);
+        int cut = n;
+        if (n > maxc) {
+            cut = maxc;
+            while (cut > 0 && p[cut] != ' ') cut--;
+            if (cut <= 0) cut = maxc;
+        }
+        char tmp[160];
+        memcpy(tmp, p, (size_t)cut);
+        tmp[cut] = 0;
+        txt(x, y + ligne * interligne, s, tmp);
+        p += cut;
+        while (*p == ' ') p++;
+    }
+}
+
 static void p_intertitre(const fdj_vue_t *v)
 {
-    txt(10, 24, 1, "MODULE 01");
-    txt_droite(190, 24, 1, "PARIS SPORTIFS & PROBAS");
+    int m = fdj_ecran_module(v->page);
+    if (m <= 0 || m >= FDJ_M_NB) return;
+    const inter_t *it = &INTER[m];
 
-    txt(11, 42, 5, "ANALYSE");
-    txt(11, 74, 4, "& DECISION");
+    char num[24];
+    snprintf(num, sizeof(num), "MODULE %02d", m);
+    txt(10, 22, 1, num);
+    txt_droite(190, 22, 1, "MAQUETTE DE DEMONSTRATION");
 
-    plein(11, 102, 190, 102, 1);
-    txt(11, 110, 1, "DES DONNEES SPORTIVES");
-    txt(11, 120, 1, "AUX INDICATEURS DU MODELE");
+    /* taille : la plus grande qui tient en largeur ET en hauteur, pour que
+       la phrase et la note gardent leur place au-dessus du bouton */
+    int sc = 3;
+    for (int essai = 6; essai >= 3; essai--) {
+        if (largeur(essai, it->haut) > 190) continue;
+        if (it->bas[0] && largeur(essai, it->bas) > 190) continue;
+        int lignes = 1 + (it->bas[0] ? 1 : 0);
+        int bas_ecran = 34 + lignes * 6 * essai + 12 + 2 * 12 + 6 + 15;
+        if (bas_ecran <= 148) { sc = essai; break; }
+    }
+    int y = 34;
+    txt(9, y, sc, it->haut);
+    y += 6 * sc;
+    if (it->bas[0]) { txt(9, y, sc, it->bas); y += 6 * sc; }
 
-    /* rappel honnete : ce qui n'est pas une cote */
-    cadre(11, 132, 190, 148, 1);
-    txt(15, 137, 1, "PROBABILITE = MODELE POISSON");
-    txt(15, 144, 1, "PAS UNE COTE, PAS UNE PROMESSE");
+    plein(9, y + 4, 191, y + 4, 1);
 
-    curseur_barre(154, 16, true);
-    txt_blanc(14, 158, 2, "B2 : CONTINUER");
-    (void)v;
+    int py = y + 12;
+    phrase_wrap(9, py, 2, 186, it->phrase, 2, 12);
+
+    int by = py + 2 * 12 + 6;
+    if (by > 142) by = 142;
+    cadre(9, by, 191, by + 15, 1);
+    char note[48];
+    elide(note, sizeof(note), 1, 176, it->note);
+    txt(13, by + 5, 1, note);
+
+    curseur_barre(156, 17, true);
+    txt_blanc(14, 160, 2, "B2 : CONTINUER");
 }
 
 /* ---------------------------------------------------------------- */
@@ -1318,95 +1421,106 @@ static void p_regles(const fdj_vue_t *v)
 }
 
 /* ---------------------------------------------------------------- */
-/* dispatch                                                         */
+/* table des ecrans : accueil + 18 x (intertitre, page)              */
 /* ---------------------------------------------------------------- */
-const char *fdj_page_titre(int page)
+static const char *TITRE_MODULE[FDJ_M_NB] = {
+    "ACCUEIL FDJ",        "PARIS SPORTIFS",  "LOTO",            "HISTORIQUE",
+    "GAINS / PERTES",     "NEWS LIVE",       "MON COUPON",      "JEU RESPONSABLE",
+    "STATS / PROBAS",     "USER STORIES",    "TESTS",           "ARCHITECTURE",
+    "PERF / SECURITE",    "MEMOIRE RAM",     "COMPTE & REGLAGES","PROFILS",
+    "ACCESSIBILITE",      "DONNEES & RGPD",  "REGLES FDJ",
+};
+
+int fdj_ecran_module(int page)
 {
-    static const char *T[FDJ_PAGES] = {
-        "ACCUEIL FDJ",
-        "ANALYSE & DECISION",
-        "PARIS SPORTIFS",
-        "LOTO",
-        "HISTORIQUE",
-        "GAINS / PERTES",
-        "NEWS LIVE",
-        "MON COUPON",
-        "JEU RESPONSABLE",
-        "STATS / PROBAS",
-        "USER STORIES",
-        "TESTS",
-        "ARCHITECTURE",
-        "PERF / SECURITE",
-        "MEMOIRE RAM",
-        "COMPTE & REGLAGES",
-        "PROFILS",
-        "ACCESSIBILITE",
-        "DONNEES & RGPD",
-        "REGLES FDJ",
-    };
-    if (page < 0 || page >= FDJ_PAGES) return "?";
-    return T[page];
+    if (page <= 0) return 0;
+    if (page >= FDJ_PAGES) return 0;
+    int m = 1 + (page - 1) / 2;
+    return m < FDJ_M_NB ? m : 0;
 }
 
-/* l'aide du pied decrit le geste REELLEMENT cable sur la page */
+bool fdj_ecran_est_intertitre(int page)
+{
+    return page > 0 && page < FDJ_PAGES && ((page % 2) == 1);
+}
+
+int fdj_module_page(int module)
+{
+    if (module <= 0) return 0;
+    return 1 + (module - 1) * 2 + 1;
+}
+
+const char *fdj_module_nom(int module)
+{
+    if (module < 0 || module >= FDJ_M_NB) return "?";
+    return TITRE_MODULE[module];
+}
+
+const char *fdj_page_titre(int page)
+{
+    if (page < 0 || page >= FDJ_PAGES) return "?";
+    return TITRE_MODULE[fdj_ecran_module(page)];
+}
+
 const char *fdj_page_aide(int page)
 {
-    static const char *A[FDJ_PAGES] = {
-        "B1:B2 DEMARRER",                 /* 1 accueil        */
-        "B2:CONTINUER",                   /* 2 intertitre     */
-        "B1:COCHER B2X2:SCORES",          /* 3 paris          */
-        "B1:GRILLE B2X2:NOUVELLE",        /* 4 loto           */
-        "B1:DETAIL B2X2:SCROLL",          /* 5 historique     */
-        "B1:PERIODE",                     /* 6 gains          */
-        "B1:LU B2X2:FORCER",              /* 7 news           */
-        "B1:VALIDER B1X2:VIDER",          /* 8 coupon         */
-        "B1:OUI B2X2:PAUSE",              /* 9 responsable    */
-        "INFOS",                          /* 10 stats         */
-        "INFOS",                          /* 11 stories       */
-        "INFOS",                          /* 12 tests         */
-        "INFOS",                          /* 13 archi         */
-        "B2X2:REFAIRE MESURES",           /* 14 perf          */
-        "B2X2:REFAIRE MESURES",           /* 15 ram           */
-        "B1:REGLER",                      /* 16 compte        */
-        "B1:ACTIVER B1X2:SUPPR",          /* 17 profils       */
-        "B1:REGLER",                      /* 18 acces         */
-        "B1:ACTION",                      /* 19 rgpd          */
-        "B1:B2 SUR FDJ.FR",               /* 20 regles        */
-    };
     if (page < 0 || page >= FDJ_PAGES) return "";
-    return A[page];
+    if (fdj_ecran_est_intertitre(page)) return "B2:CONTINUER";
+    switch (fdj_ecran_module(page)) {
+    case FDJ_M_ACCUEIL:  return "B1:B2 DEMARRER";
+    case FDJ_M_PARIS:    return "B1:COCHER B2X2:SCORES";
+    case FDJ_M_LOTO:     return "B1:GRILLE B2X2:NOUVELLE";
+    case FDJ_M_HIST:     return "B1:DETAIL B2X2:SCROLL";
+    case FDJ_M_GAINS:    return "B1:PAR JEU";
+    case FDJ_M_NEWS:     return "B1:LU B2X2:FORCER";
+    case FDJ_M_COUPON:   return "B1:VALIDER B1X2:VIDER";
+    case FDJ_M_RESP:     return "B1:OUI B2X2:PAUSE";
+    case FDJ_M_STATS:    return "INFOS";
+    case FDJ_M_STORIES:  return "INFOS";
+    case FDJ_M_TESTS:    return "INFOS";
+    case FDJ_M_ARCHI:    return "INFOS";
+    case FDJ_M_PERF:     return "B2X2:REFAIRE MESURES";
+    case FDJ_M_RAM:      return "B2X2:REFAIRE MESURES";
+    case FDJ_M_COMPTE:   return "B1:REGLER";
+    case FDJ_M_PROFILS:  return "B1:ACTIVER B1X2:SUPPR";
+    case FDJ_M_ACCES:    return "B1:REGLER";
+    case FDJ_M_RGPD:     return "B1:ACTION";
+    case FDJ_M_REGLES:   return "B1:B2 SUR FDJ.FR";
+    default:             return "";
+    }
 }
 
 int fdj_page_items(int page, const fdj_vue_t *v)
 {
-    switch (page) {
-    case 0:  return 1;
-    case 1:  return 1;
-    case 2:  return v->top && v->top->n > 0 ? v->top->n : 1;
-    case 3:  return FDJ_GRILLE_MAX + 1;
-    case 4: {
+    if (page < 0 || page >= FDJ_PAGES) return 1;
+    if (fdj_ecran_est_intertitre(page)) return 1;
+    switch (fdj_ecran_module(page)) {
+    case FDJ_M_ACCUEIL:  return 1;
+    case FDJ_M_PARIS:    return v->top && v->top->n > 0 ? v->top->n : 1;
+    case FDJ_M_LOTO:     return FDJ_GRILLE_MAX + 1;
+    case FDJ_M_HIST: {
         if (v->e->hist_n == 0) return 1;
         bool plus = false;
         int n = hist_affiche(v->e, &plus);
         if (n < 1) return 1;
         return plus ? n + 1 : n;
     }
-    case 5:  return 3;
-    case 6:  return v->news && v->news->nb > 0 ? (v->news->nb < 4 ? v->news->nb : 4) : 1;
-    case 7:  return coupon_nb(v) + 2;
-    case 8:  return QN + 1;
-    case 9:  return 4;
-    case 10: return USN;
-    case 11: return 4;
-    case 12: return 4;
-    case 13: return 3;
-    case 14: return 3;
-    case 15: return 5;
-    case 16: return v->e->nb_profils + 1;
-    case 17: return 4;
-    case 18: return 3;
-    case 19: return 3;
-    default: return 1;
+    case FDJ_M_GAINS:    return 3;
+    case FDJ_M_NEWS:     return v->news && v->news->nb > 0 ? (v->news->nb < 4 ? v->news->nb : 4) : 1;
+    case FDJ_M_COUPON:   return coupon_nb(v) + 2;
+    case FDJ_M_RESP:     return QN + 1;
+    case FDJ_M_STATS:    return 4;
+    case FDJ_M_STORIES:  return USN;
+    case FDJ_M_TESTS:    return 4;
+    case FDJ_M_ARCHI:    return 4;
+    case FDJ_M_PERF:     return 3;
+    case FDJ_M_RAM:      return 3;
+    case FDJ_M_COMPTE:   return 5;
+    case FDJ_M_PROFILS:  return v->e->nb_profils + 1;
+    case FDJ_M_ACCES:    return 4;
+    case FDJ_M_RGPD:     return 3;
+    case FDJ_M_REGLES:   return 3;
+    default:             return 1;
     }
 }
 
@@ -1417,28 +1531,31 @@ void fdj_ui_dessine(const fdj_vue_t *v, uint8_t *fb)
     if (!v || !v->e) return;
 
     entete(v, fdj_page_titre(v->page));
-    switch (v->page) {
-    case 0:  p_accueil(v); break;
-    case 1:  p_intertitre(v); break;
-    case 2:  p_paris(v); break;
-    case 3:  p_loto(v); break;
-    case 4:  p_historique(v); break;
-    case 5:  p_gains(v); break;
-    case 6:  p_news(v); break;
-    case 7:  p_coupon(v); break;
-    case 8:  p_responsable(v); break;
-    case 9:  p_stats(v); break;
-    case 10: p_stories(v); break;
-    case 11: p_tests(v); break;
-    case 12: p_archi(v); break;
-    case 13: p_perf(v); break;
-    case 14: p_ram(v); break;
-    case 15: p_compte(v); break;
-    case 16: p_profils(v); break;
-    case 17: p_acces(v); break;
-    case 18: p_rgpd(v); break;
-    case 19: p_regles(v); break;
-    default: txt_centre(100, 90, 2, "PAGE INCONNUE"); break;
+    if (fdj_ecran_est_intertitre(v->page)) {
+        p_intertitre(v);
+    } else {
+        switch (fdj_ecran_module(v->page)) {
+        case FDJ_M_ACCUEIL:  p_accueil(v); break;
+        case FDJ_M_PARIS:    p_paris(v); break;
+        case FDJ_M_LOTO:     p_loto(v); break;
+        case FDJ_M_HIST:     p_historique(v); break;
+        case FDJ_M_GAINS:    p_gains(v); break;
+        case FDJ_M_NEWS:     p_news(v); break;
+        case FDJ_M_COUPON:   p_coupon(v); break;
+        case FDJ_M_RESP:     p_responsable(v); break;
+        case FDJ_M_STATS:    p_stats(v); break;
+        case FDJ_M_STORIES:  p_stories(v); break;
+        case FDJ_M_TESTS:    p_tests(v); break;
+        case FDJ_M_ARCHI:    p_archi(v); break;
+        case FDJ_M_PERF:     p_perf(v); break;
+        case FDJ_M_RAM:      p_ram(v); break;
+        case FDJ_M_COMPTE:   p_compte(v); break;
+        case FDJ_M_PROFILS:  p_profils(v); break;
+        case FDJ_M_ACCES:    p_acces(v); break;
+        case FDJ_M_RGPD:     p_rgpd(v); break;
+        case FDJ_M_REGLES:   p_regles(v); break;
+        default:             txt_centre(100, 90, 2, "ECRAN INCONNU"); break;
+        }
     }
     pied(v);
 }

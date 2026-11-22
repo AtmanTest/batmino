@@ -131,7 +131,7 @@ int main(void)
         fdj_ui_dessine(&v, fbm);
         if (noirs() > 150) pages_ok++;
     }
-    OK(pages_ok == FDJ_PAGES, "les 20 pages s'affichent avec les vraies donnees");
+    OK(pages_ok == FDJ_PAGES, "les 37 ecrans s'affichent avec les vraies donnees");
 
     /* la page paris doit montrer des selections, pas un message d'attente */
     v.page = 2;
