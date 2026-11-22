@@ -1,6 +1,6 @@
 # Recette — BATMino x FDJ
 
-Lancee le 2026-11-22 21:40, commit b69f1b9.
+Lancee le 2026-11-22 21:43, commit 01c3128.
 
 ## Chiffres reels
 
