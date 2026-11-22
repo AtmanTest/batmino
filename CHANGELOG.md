@@ -1,5 +1,11 @@
 # Journal des versions
 
+## 4.1.1 — 2026-11-22 — nettoyage
+
+- Intertitre : la taille du grand titre passe par `fit_s` (largeur) puis par
+  une boucle de hauteur, au lieu de deux calculs dupliqués. Aucun changement
+  visible, aucun avertissement de compilation.
+
 ## 4.1.0 — 2026-11-22 — 37 écrans et Wi-Fi de démonstration
 
 ### Ajouté

@@ -351,16 +351,11 @@ static void p_intertitre(const fdj_vue_t *v)
     txt(10, 22, 1, num);
     txt_droite(190, 22, 1, "MAQUETTE DE DEMONSTRATION");
 
-    /* taille : la plus grande qui tient en largeur ET en hauteur, pour que
-       la phrase et la note gardent leur place au-dessus du bouton */
-    int sc = 3;
-    for (int essai = 6; essai >= 3; essai--) {
-        if (largeur(essai, it->haut) > 190) continue;
-        if (it->bas[0] && largeur(essai, it->bas) > 190) continue;
-        int lignes = 1 + (it->bas[0] ? 1 : 0);
-        int bas_ecran = 34 + lignes * 6 * essai + 12 + 2 * 12 + 6 + 15;
-        if (bas_ecran <= 148) { sc = essai; break; }
-    }
+    /* taille : la plus grande qui tient en largeur (fit_s) puis en hauteur,
+       pour que la phrase et la note gardent leur place au-dessus du bouton */
+    int sc = fit_s(it->haut, it->bas, 190);
+    int lignes = 1 + (it->bas[0] ? 1 : 0);
+    while (sc > 3 && 34 + lignes * 6 * sc + 12 + 2 * 12 + 6 + 15 > 148) sc--;
     int y = 34;
     txt(9, y, sc, it->haut);
     y += 6 * sc;
