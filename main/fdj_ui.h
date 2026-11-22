@@ -1,8 +1,8 @@
-/*  fdj_ui.h — les 19 pages de la maquette FDJ, dessinees en 1 bit.
+/*  fdj_ui.h — les 20 pages de la maquette FDJ, dessinees en 1 bit.
  *
  *  Pur C++/art.h : aucun include ESP-IDF, donc le MEME code dessine sur la
  *  carte et dans l'apercu PNG du PC (tools/apercu_fdj.cpp). C'est ainsi que
- *  les 19 pages sont verifiees a l'oeil avant de flasher.
+ *  les 20 pages sont verifiees a l'oeil avant de flasher.
  *
  *  Une page = un titre en haut (toujours), une liste d'items navigables,
  *  un pied qui rappelle les gestes. Le curseur est un rectangle plein, la
@@ -32,11 +32,14 @@ typedef struct {
     int  rssi;
     uint32_t heap_int_libre;   /* octets */
     uint32_t heap_int_max;     /* plus gros bloc libre */
+    uint32_t heap_int_total;   /* capacite reelle (heap_caps_get_total_size) */
     uint32_t psram_libre;
+    uint32_t psram_total;
     bool  sd_ok;
     int   rendu_ms;            /* duree du dernier dessin complet   */
     int   ecran_ms;            /* duree du dernier rafraichissement */
     bool  code_affiche;        /* page 15 : mot de passe revele     */
+    bool  gains_detail;        /* page 5 : ventilation par jeu      */
     const char *message;       /* bandeau temporaire, sinon NULL    */
     bool  heure_ok;            /* false : l'heure n'est pas synchronisee */
     /* grilles de loto du jour, calculees une fois par graine */
@@ -51,8 +54,14 @@ void fdj_ui_dessine(const fdj_vue_t *v, uint8_t *fb);
 /* titre de la page, pour le journal et les tests */
 const char *fdj_page_titre(int page);
 
+/* aide de pied de page, propre a la page (coherente avec les gestes reels) */
+const char *fdj_page_aide(int page);
+
 /* nombre d'items navigables de la page (>= 1) */
 int fdj_page_items(int page, const fdj_vue_t *v);
+
+/* detail plein ecran d'un pari de l'historique (B1 sur une ligne) */
+void fdj_ui_detail(uint8_t *fb, const fdj_pari_t *p, int idx);
 
 /* saisie du code de demarrage / changement de code : par-dessus la page */
 void fdj_ui_demande_code(uint8_t *fb, const char *titre, const uint8_t chiffres[4],
