@@ -1,5 +1,12 @@
 # Journal des versions
 
+## 4.0.1 — 2026-11-22 — documentation de la démonstration
+
+- `docs/DEMO-ENTRETIEN.md` : parcours de 3 minutes, gestes et réponses aux
+  questions probables (le prompt de livraison le demandait).
+- Aucun changement de comportement ; firmware recompilé et recette relancée
+  pour que la version affichée (4.0.1) corresponde au dépôt.
+
 ## 4.0.0 — 2026-11-22 — FDT (BATMino x FDJ), refonte visuelle et corrections
 
 Refonte de la maquette pour l'entretien : 20 écrans, gabarit homogène, et
