@@ -159,26 +159,26 @@ static void p_accueil(const fdj_vue_t *v)
 
     if (v->live && v->live->ok && v->live->n > 0) {
         snprintf(b, sizeof(b), "%d MATCHS EN DIRECT", v->live->n);
-        t5(6, 128, b);
+        t5(6, 126, b);
         if (v->live->m[0].dom[0]) {
             char l[44];
             snprintf(l, sizeof(l), "%s %d-%d %s", v->live->m[0].dom,
                      v->live->m[0].buts_dom, v->live->m[0].buts_ext, v->live->m[0].ext);
             elide(b, sizeof(b), 150, l);
-            t5(6, 140, b);
+            t5(6, 136, b);
         }
     } else {
-        t5(6, 128, "HORS LIGNE");
-        t5(6, 140, "SCORES : N.D.");
+        t5(6, 126, "HORS LIGNE");
+        t5(6, 136, "SCORES : N.D.");
     }
 
-    sel_bar(152, 15, v->curseur == 0);
-    if (v->curseur == 0) t5w(6, 154, "DEMARRER LA VISITE");
-    else                 t5(6, 154, "DEMARRER LA VISITE");
+    sel_bar(148, 15, v->curseur == 0);
+    if (v->curseur == 0) t5w(6, 150, "DEMARRER LA VISITE");
+    else                 t5(6, 150, "DEMARRER LA VISITE");
 
     char bas[40];
     snprintf(bas, sizeof(bas), "FDT %s - %u DEMARRAGES", FDJ_VERSION, (unsigned)e->boots);
-    t5(6, 170, bas);
+    t5(6, 166, bas);
 }
 
 /* ---------------------------------------------------------------- */

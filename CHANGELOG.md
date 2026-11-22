@@ -1,5 +1,13 @@
 # Journal des versions
 
+## 4.1.5 — 2026-11-22 — zéro propre, accueil resserré
+
+- Police 5×10 : le zéro était barré (0x19/0x15/0x13), il lisait « Ø » dans les
+  montants. Remplacé par un zéro rond, sur tous les chiffres de l'interface.
+- Accueil : « 2 MATCHS EN DIRECT » et le score remontés de 4 px, pour que la
+  ligne FDT ne touche plus le bandeau de message.
+- Vérifié sur la dalle réelle après flash (capture /ecran).
+
 ## 4.1.4 — 2026-11-22 — lisibilité 5×10, son coupé
 
 - **Toute l'interface passe en police 5×10** (FONT5) : 33 caractères par ligne,
